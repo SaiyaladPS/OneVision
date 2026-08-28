@@ -1,0 +1,67 @@
+pipeline_mode: auto
+
+# Optional plate scanning region. Set enabled: true to ignore detections whose
+# centre is outside this region and draw its boundary on image/video/camera
+# previews. Coordinates are relative to the frame (0.0 to 1.0), so the same
+# values work with different camera resolutions.
+# shape: rectangle (straight edges), circle, or ellipse
+scan_roi:
+  enabled: true
+  shape: rectangle
+  unit: normalized
+  x: 0.05
+  y: 0.10
+  width: 0.90
+  height: 0.80
+  color: "#ff0000"
+  thickness: 3
+
+# Raw class names are exactly those stored in the current vehicle model.
+# Add new entries when a replacement model contains additional classes.
+vehicle_class_mapping:
+  trak: {display_name: Truck, normalized_class: truck}
+  cyclist: {display_name: Cyclist, normalized_class: other}
+  bike: {display_name: Motorcycle, normalized_class: motorcycle}
+  tempo: {display_name: Tuk Tuk, normalized_class: tuk_tuk}
+  car: {display_name: Car, normalized_class: car}
+  zeep: {display_name: SUV / Jeep, normalized_class: suv}
+  toto: {display_name: Tuk Tuk, normalized_class: tuk_tuk}
+  e-rickshaw: {display_name: Electric Rickshaw, normalized_class: tuk_tuk}
+  auto-rickshaw: {display_name: Auto Rickshaw, normalized_class: tuk_tuk}
+  bus: {display_name: Bus, normalized_class: bus}
+  van: {display_name: Van, normalized_class: van}
+  cycle-rickshaw: {display_name: Cycle Rickshaw, normalized_class: tuk_tuk}
+  person: {display_name: Person, normalized_class: other}
+  taxi: {display_name: Taxi, normalized_class: car}
+
+# This remains empty until a real plate-type model/dataset is supplied.
+# Never invent classes here; keys must match model.names exactly.
+plate_class_mapping: {}
+
+country:
+  # Weak/empty Thai and Lao character-model readings remain unknown.
+  unknown_score: 0.30
+
+preprocessing_profiles:
+  "thai|motorcycle|*": thai_motorcycle
+  "thai|*|*": thai_common
+  "lao|motorcycle|*": lao_motorcycle
+  "lao|*|*": lao_common
+  "*|*|*": common
+
+# Parameters are applied by preprocess_plate_crop after the contextual route
+# above is selected. Profiles can be tuned without changing Python code.
+preprocessing_parameters:
+  common: {target_width: 720, max_scale: 5.0, clahe_clip: 2.2, sharpen_strength: 0.35, border_ratio: 0.025}
+  thai_common: {target_width: 760, max_scale: 5.0, clahe_clip: 2.3, sharpen_strength: 0.35, border_ratio: 0.025}
+  lao_common: {target_width: 780, max_scale: 5.0, clahe_clip: 2.4, sharpen_strength: 0.38, border_ratio: 0.03, perspective: true, perspective_min_area: 0.35}
+  thai_motorcycle: {target_width: 900, max_scale: 6.0, clahe_clip: 2.7, sharpen_strength: 0.42, border_ratio: 0.04}
+  lao_motorcycle: {target_width: 900, max_scale: 6.0, clahe_clip: 2.8, sharpen_strength: 0.45, border_ratio: 0.04, perspective: true, perspective_min_area: 0.30}
+
+ocr_routes:
+  # There is currently one shared OCR model. Add contextual routes only when
+  # matching trained OCR weights are actually available.
+  "*|*|*": common_ocr
+
+# Extra rules may be added as country|vehicle_type|plate_type mappings.
+validation: {}

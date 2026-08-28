@@ -1,0 +1,66 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+.venv-paddle/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE and build output
+.vscode/
+build/
+dist/
+
+# Application scan output and local datasets
+/runs/
+/output/
+/Images/
+/auto/dataset/
+
+# PaddleOCR generated data/output (keep the vendored source and configs)
+/model/paddleocr_train2/train_data/
+/model/paddleocr_train2/output/
+
+# Training datasets, runs, plots, and generated manifests.
+# Training source files remain versionable under model/train/.
+/model/train/*-train/dataset/*
+!/model/train/*-train/dataset/
+!/model/train/*-train/dataset/*.py
+!/model/train/*-train/dataset/*.yaml
+!/model/train/*-train/dataset/*.yml
+/model/train/*-train/dataset/*.generated.yaml
+/model/train/*-train/dataset/*.generated.yml
+/model/train/*-train/runs/
+/model/train/*-train/weights/
+/model/train/*-train/**/weights/
+/model/train/*-train/**/*.pt
+/model/train/*-train/**/*.png
+/model/train/*-train/**/*.jpg
+/model/train/*-train/**/*.jpeg
+/model/train/*-train/**/*.csv
+/model/train/*-train/**/args.yaml
+/model/train/*-train/*.png
+/model/train/*-train/*.jpg
+/model/train/*-train/*.jpeg
+/model/train/*-train/*.csv
+/model/train/*-train/args.yaml
+/model/train/*-train/datasets/
+
+# Training history/checkpoints are not required by the runtime application.
+# Keep only each model's deployable best.pt in Git.
+/model/**/weights/epoch*.pt
+/model/**/weights/last.pt
+
+# Large OCR pretraining data is only needed when reproducing OCR training.
+/PP-OCRv5_mobile_rec_pretrained.pdparams
+
+# Logs and archives generated locally
+*.log
+*.zip

@@ -1,0 +1,2 @@
+ultralytics>=8.3,<9
+roboflow>=1.4.1,<2

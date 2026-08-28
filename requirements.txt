@@ -1,0 +1,10 @@
+PyQt6>=6.7,<7
+numpy>=1.26,<3
+opencv-python>=4.10,<5
+psycopg[binary]>=3.2,<4
+ultralytics>=8.3,<9
+PyYAML>=6.0,<7
+roboflow>=1.4.1,<2
+# Optional OCR backends used by the existing engine:
+# torch>=2.2
+# paddleocr>=2.8
