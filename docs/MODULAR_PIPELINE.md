@@ -39,7 +39,7 @@ Validation rules use the same context keys and may configure:
 ## Debugging
 
 Set `CAR_SCAN_DEBUG=1` to save stage-oriented images and OCR metadata under
-`runs/scan/YYYYMMDD/debug/`. Debug output includes vehicle/plate annotations, crops,
+`scan/data/YYYYMMDD/debug/`. Debug output includes vehicle/plate annotations, crops,
 contextual preprocessing, country and vehicle groups, OCR JSON, and rejected
 results.
 

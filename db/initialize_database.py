@@ -1,4 +1,4 @@
-"""Initialize PostgreSQL and import existing scan JSON files once.
+"""Initialize PostgreSQL through Prisma and import existing scan JSON files once.
 
 Usage from the repository root:
     .venv\\Scripts\\python.exe db\\initialize_database.py
@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from car_scan.config import Settings  # noqa: E402
 from car_scan.database import DatabaseRepository  # noqa: E402
+from car_scan.prisma_db import push_schema  # noqa: E402
 
 
 def main() -> int:
@@ -22,8 +23,8 @@ def main() -> int:
     if not settings.database_url:
         raise SystemExit("ไม่พบ CAR_SCAN_DATABASE_URL ใน environment หรือไฟล์ .env")
 
+    push_schema(settings.database_url)
     repository = DatabaseRepository(settings.database_url)
-    repository.initialize_schema()
     existing = repository.count_scans()
     imported = 0
 
@@ -40,7 +41,7 @@ def main() -> int:
             except (OSError, ValueError, TypeError, KeyError) as error:
                 print(f"ข้าม {result_path}: {error}", file=sys.stderr)
 
-    print(f"PostgreSQL schema ready: {settings.database_url.split('@')[-1]}")
+    print(f"Prisma schema ready: {settings.database_url.split('@')[-1]}")
     print(f"Existing scans: {existing}")
     print(f"Imported scan results from runs: {imported}")
     print(f"Total scans now: {repository.count_scans()}")

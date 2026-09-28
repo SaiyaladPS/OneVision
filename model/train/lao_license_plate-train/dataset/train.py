@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,32 @@ DATA_MANIFEST = SCRIPT_DIR / "lao_plate_data.generated.yaml"
 # Keep training outputs beside ``dataset/`` rather than inside the dataset.
 RUNS_DIR = TRAINING_DIR / "runs"
 BASE_MODEL = os.getenv("LAO_TRAIN_BASE_MODEL", "yolo11s.pt")
+
+
+def _run_number(path: Path, base_name: str) -> int | None:
+    if path.name == base_name:
+        return 0
+    match = re.fullmatch(re.escape(base_name) + r"_(\d+)", path.name)
+    return int(match.group(1)) if match else None
+
+
+def latest_run(base_name: str) -> Path | None:
+    candidates = []
+    if RUNS_DIR.is_dir():
+        for path in RUNS_DIR.iterdir():
+            checkpoint = path / "weights" / "last.pt"
+            if _run_number(path, base_name) is not None and checkpoint.is_file() and checkpoint.stat().st_size > 0:
+                candidates.append(path)
+    return max(candidates, key=lambda path: (_run_number(path, base_name) or 0, path.stat().st_mtime), default=None)
+
+
+def next_run_name(base_name: str) -> str:
+    if not (RUNS_DIR / base_name).exists():
+        return base_name
+    index = 1
+    while (RUNS_DIR / f"{base_name}_{index}").exists():
+        index += 1
+    return f"{base_name}_{index}"
 
 
 def find_default_weights() -> Path:
@@ -166,6 +193,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--device", default=None, help="cpu, 0, 1, or xpu:0")
     parser.add_argument("--name", default="lao_license_plate_finetune")
+    parser.add_argument("--new-run", action="store_true", help="Start a fresh numbered run instead of resuming the latest run.")
     return parser.parse_args()
 
 
@@ -182,7 +210,18 @@ def main() -> None:
             f"Dataset selector 'all' is accepted by the shared launcher; "
             f"using Lao dataset: {DATASET_DIR}"
         )
-    resume_mode = os.getenv("CAR_SCAN_TRAIN_RESUME", "ask").strip().lower()
+    resume_mode = os.getenv("CAR_SCAN_TRAIN_RESUME", "auto").strip().lower()
+    start_new = args.new_run or resume_mode in {"no", "false", "0", "new"}
+    resume_run = None if start_new else latest_run(args.name)
+    if resume_run is not None:
+        args.name = resume_run.name
+        resume_mode = "yes"
+    elif start_new:
+        args.name = next_run_name(args.name)
+        resume_mode = "no"
+    else:
+        # No resumable checkpoint exists; avoid colliding with an old/incomplete directory.
+        args.name = next_run_name(args.name)
     resume_checkpoint = os.getenv("CAR_SCAN_TRAIN_CHECKPOINT", "").strip()
     if resume_mode == "yes":
         if not resume_checkpoint:

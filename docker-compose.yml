@@ -1,0 +1,44 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: car-scan-web:local
+    ports:
+      - "${CAR_SCAN_WEB_PORT:-8000}:8000"
+    environment:
+      CAR_SCAN_ROOT: /app
+      CAR_SCAN_OUTPUT_DIR: /app/scan/data
+      CAR_SCAN_WEB_HOST: 0.0.0.0
+      CAR_SCAN_WEB_PORT: "8000"
+      CAR_SCAN_WEB_MAX_UPLOAD_MB: "${CAR_SCAN_WEB_MAX_UPLOAD_MB:-4096}"
+      CAR_SCAN_PIPELINE_CONFIG: /app/pipeline_config.yaml
+      CAR_SCAN_DATABASE_URL: postgresql://car_scan:${POSTGRES_PASSWORD:-change-me}@db:5432/car_scan
+      CAR_SCAN_ADMIN_USERNAME: "${CAR_SCAN_ADMIN_USERNAME:-admin}"
+      CAR_SCAN_ADMIN_PASSWORD: "${CAR_SCAN_ADMIN_PASSWORD:-changeme}"
+      CAR_SCAN_AUTH_SECRET: "${CAR_SCAN_AUTH_SECRET:-}"
+    volumes:
+      - ./scan/data:/app/scan/data
+    depends_on:
+      db:
+        condition: service_healthy
+    shm_size: "1gb"
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: car_scan
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: car_scan
+    volumes:
+      - car_scan_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U car_scan -d car_scan"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  car_scan_postgres:

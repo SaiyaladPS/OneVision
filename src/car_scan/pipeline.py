@@ -10,6 +10,8 @@ from typing import Any
 
 import yaml
 
+from .compute import bind_yolo_device, yolo_predict
+
 
 UNKNOWN_CLASS = {
     "raw_class": "unknown",
@@ -74,10 +76,16 @@ class ClassMapper:
 class YoloRegionClassifier:
     """Generic YOLO adapter whose class names always come from the model."""
 
-    def __init__(self, model_path: Path | None, mapping: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        model_path: Path | None,
+        mapping: dict[str, Any] | None = None,
+        device: str | None = None,
+    ) -> None:
         self.mapper = ClassMapper(mapping)
         self.model = None
         self.model_path = model_path
+        self.device = device or "cpu"
         if model_path is None:
             return
         if not model_path.is_file():
@@ -87,6 +95,7 @@ class YoloRegionClassifier:
         except ImportError as error:
             raise RuntimeError("Missing dependency 'ultralytics'") from error
         self.model = YOLO(str(model_path))
+        bind_yolo_device(self.model, self.device)
 
     def _name(self, class_id: int) -> str:
         if self.model is None:
@@ -99,7 +108,9 @@ class YoloRegionClassifier:
     def detect(self, image: Any, confidence: float, imgsz: int) -> list[dict[str, Any]]:
         if self.model is None:
             return []
-        prediction = self.model.predict(image, conf=confidence, imgsz=imgsz, verbose=False)[0]
+        prediction = yolo_predict(
+            self.model, image, device=self.device, conf=confidence, imgsz=imgsz, verbose=False
+        )[0]
         output: list[dict[str, Any]] = []
         if getattr(prediction, "boxes", None) is not None:
             for xyxy, score, class_id in zip(
@@ -271,7 +282,15 @@ class ContextValidator:
         if country not in ("thai", "lao"):
             reasons.append("country_unknown")
         if country == "thai":
-            if not (len(prefix) == 2 and prefix.isdigit()):
+            thai_letters = 1 <= len(prefix) <= 3 and all("\u0e01" <= character <= "\u0e2e" for character in prefix)
+            thai_digits = prefix.isdigit() and len(prefix) in {2, 3}
+            motorcycle = (
+                len(number) == 4
+                and number.isdigit()
+                and bool(province)
+                and (vehicle_type == "motorcycle" or not prefix)
+            )
+            if not (thai_letters or thai_digits or motorcycle):
                 reasons.append("thai_prefix_must_have_2_digits")
             if not (len(number) == 4 and number.isdigit()):
                 reasons.append("thai_number_must_have_4_digits")

@@ -37,7 +37,7 @@
 
 GUI เลือกกล้องหมายเลข 0–2 ได้ กล้องทำงานใน worker thread และเปิดผ่าน DirectShow บน Windows เพื่อลดปัญหา backend/permission เฟรม preview ถูกจำกัดอัตราส่งเพื่อไม่ให้ Qt event queue ค้าง
 
-ผลกล้องจะถูกส่งเข้าตาราง GUI เมื่อทะเบียนเดิมมีรูปแบบครบ, ผ่านคะแนนคุณภาพ และพบซ้ำอย่างน้อย 3 ครั้งเท่านั้น ผู้ใช้เลือกให้หยุดอัตโนมัติเมื่อพบทะเบียนแรก หรือสแกนต่อเนื่องและกดหยุดเองได้
+ผลกล้องจะถูกส่งเข้าตาราง GUI เมื่อทะเบียนเดิมมีรูปแบบครบ, ผ่านคะแนนคุณภาพ และพบซ้ำตามค่า `CAR_SCAN_CAMERA_MIN_CONFIRMATIONS` (ค่าเริ่มต้น 2 ครั้ง) ผู้ใช้เลือกให้หยุดอัตโนมัติเมื่อพบทะเบียนแรก หรือสแกนต่อเนื่องและกดหยุดเองได้
 
 ค่าที่ปรับได้จาก `.env` ได้แก่ `CAR_SCAN_VIDEO_TARGET_SCANS_PER_SECOND`, `CAR_SCAN_VIDEO_MIN_CONFIRMATIONS`, `CAR_SCAN_CAMERA_FRAME_STRIDE`, `CAR_SCAN_CAMERA_MIN_CONFIRMATIONS` และ `CAR_SCAN_TEMPORAL_MIN_QUALITY`
 

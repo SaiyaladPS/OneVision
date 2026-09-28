@@ -1,27 +1,42 @@
-# Daily scan output
+# Scan archive and training export layout
 
-All files produced by a scan are grouped below the configured output folder by
-the local scan date:
-
-```text
-runs/scan/YYYYMMDD/
-  <input>_annotated.jpg
-  <input>_result.json
-  full_vehicle/
-  plate_crops/
-  ocr/<province-code>-<plate-prefix>/
-  yolo11_ocr_dataset/{thai,lao}/
-  dataset_exports/
-  debug/                 # only when CAR_SCAN_DEBUG=1
-```
-
-Confirmed plate archives use the shared filename format:
+New scans are stored under `scan/data/YYYYMMDD/` (or the directory set by
+`CAR_SCAN_OUTPUT_DIR`). The same layout is used for image uploads, video
+uploads, and live cameras.
 
 ```text
-<cctv-camera>-<province-code>-<plate-prefix>-<plate-number>-<YYYYMMDD>-<daily-sequence>.jpg
+scan/data/YYYYMMDD/
+  thai/                  # confirmed Thai plate evidence
+  laos/                  # confirmed Lao plate evidence
+    <stem>-full_vehicle.jpg
+    <stem>-plate_crops.jpg
+    <stem>-ocr_ready.jpg
+  json/                  # result manifests and plate metadata
+  log/                   # detection logs and annotated snapshots
+  video/                 # annotated video uploads
 ```
 
-For example: `0-BKK-63-7998-20260827-028.jpg`. The daily sequence starts at
-`001` and is calculated only from files in that date's `full_vehicle` folder.
-The same stem is used for the vehicle image, plate crop, OCR-ready image,
-character-annotated image, and OCR metadata.
+`<stem>` is `<camera>-<province>-<prefix>-<number>-<YYYYMMDD>-<sequence>`.
+
+## Create a training export
+
+Run the script without options and it asks for CVAT/Roboflow and the desired
+date selection:
+
+```powershell
+.\.venv\Scripts\python.exe tools\build_training_dataset.py
+```
+
+```powershell
+# A whole date range
+.\.venv\Scripts\python.exe tools\build_training_dataset.py --format cvat --dates 20260802-20260803
+
+# Specific separate dates
+.\.venv\Scripts\python.exe tools\build_training_dataset.py --format roboflow --dates 20260802,20260805
+```
+
+The results are written as `cvat/cvat-20260802-20260803/` or
+`roboflow/roboflow-20260802-20260803/`. Both contain Thai, Lao, detector, and
+OCR sets with `PASS` and `REJECT` folders. `PASS` is a scanner pre-label and
+must be reviewed before training; `REJECT` must be manually annotated before
+using it as OCR truth.

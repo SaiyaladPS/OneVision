@@ -1,9 +1,9 @@
 pipeline_mode: auto
 
-# Optional plate scanning region. Set enabled: true to ignore detections whose
-# centre is outside this region and draw its boundary on image/video/camera
-# previews. Coordinates are relative to the frame (0.0 to 1.0), so the same
-# values work with different camera resolutions.
+# Optional plate scanning region. Set enabled: true to keep only detections
+# whose centre is inside this region and draw its boundary on previews. The
+# detector still runs on the full vehicle frame (how detect_license was
+# trained). Coordinates are relative to the frame (0.0 to 1.0).
 # shape: rectangle (straight edges), circle, or ellipse
 scan_roi:
   enabled: true

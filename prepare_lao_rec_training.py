@@ -78,7 +78,11 @@ def transcription(boxes: list[Box]) -> tuple[str | None, str]:
     province_boxes = [box for box in boxes if box.label in LAO_PROVINCE_NAMES]
     if not province_boxes:
         return None, "missing province token"
-    province = max(province_boxes, key=lambda box: box.y).label
+    province_code = max(province_boxes, key=lambda box: box.y).label
+    # Recognition ground truth uses the human-readable Lao province name,
+    # not the detector's ASCII class code.  The runtime keeps the code
+    # separately in ``province_code`` after OCR.
+    province = LAO_PROVINCE_NAMES[province_code]
 
     line_boxes = [box for box in boxes if box not in province_boxes]
     line_boxes.sort(key=lambda box: box.x)
@@ -117,11 +121,10 @@ def write_detail_list(path: Path, items: list[tuple[str, str]]) -> None:
 
 def write_dictionary(items: list[tuple[str, str]]) -> None:
     values = {character for _, text in items for character in text if character != " "}
-    # Keep the original punctuation/digits first, then the Lao glyphs and the
-    # ASCII province-code characters used by the detection dataset.
+    # Keep only characters that can occur in the canonical full-name format:
+    # ``Lao province name + space + Lao prefix + four digits``.
     ordered = ["-"] + list("0123456789")
     ordered += sorted(character for character in values if "\u0e80" <= character <= "\u0eff")
-    ordered += sorted(character for character in values if character.isascii() and character.isalpha())
     DICT_PATH.write_text("\n".join(dict.fromkeys(ordered)) + "\n", encoding="utf-8")
 
 

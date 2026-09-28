@@ -1,3 +1,3 @@
-"""Car Scan desktop application."""
+"""Car Scan web application."""
 
 __version__ = "0.1.0"

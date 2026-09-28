@@ -1,0 +1,89 @@
+// Car Scan database managed by Prisma Client Python (sync).
+// Connection string comes from CAR_SCAN_DATABASE_URL.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("CAR_SCAN_DATABASE_URL")
+}
+
+generator client {
+  provider             = "prisma-client-py"
+  interface            = "sync"
+  recursive_type_depth = 5
+}
+
+model ScanRun {
+  id               BigInt   @id @default(autoincrement())
+  sourcePath       String   @map("source_path")
+  annotatedImage   String?  @map("annotated_image")
+  outputVideo      String?  @map("output_video")
+  mediaType        String?  @map("media_type")
+  plateCount       Int      @default(0) @map("plate_count")
+  scannedAt        DateTime @default(now()) @map("scanned_at") @db.Timestamptz(6)
+  rawResult        Json     @map("raw_result")
+  operatorId       Int?     @map("operator_id")
+  operatorName     String?  @map("operator_name")
+  operatorUsername String?  @map("operator_username")
+  plates           Plate[]
+
+  @@index([scannedAt(sort: Desc)], map: "ix_scan_runs_scanned_at")
+  @@index([operatorId], map: "ix_scan_runs_operator_id")
+  @@map("scan_runs")
+}
+
+model Plate {
+  id                    BigInt  @id @default(autoincrement())
+  scanId                BigInt  @map("scan_id")
+  plateIndex            Int     @map("plate_index")
+  country               String  @db.VarChar(16)
+  province              String?
+  provinceCode          String? @map("province_code")
+  platePrefix           String? @map("plate_prefix")
+  platePrefixCode       String? @map("plate_prefix_code")
+  plateNumber           String? @map("plate_number")
+  ocrText               String? @map("ocr_text")
+  ocrConfidence         Float   @default(0) @map("ocr_confidence")
+  detectionConfidence   Float   @default(0) @map("detection_confidence")
+  recognitionConfidence Float?  @map("recognition_confidence")
+  overallConfidence     Float?  @map("overall_confidence")
+  confidenceLevel       String? @map("confidence_level")
+  vehicleType           String? @map("vehicle_type")
+  vehicleTypeConfidence Float?  @map("vehicle_type_confidence")
+  plateType             String? @map("plate_type")
+  vehicleImage          String? @map("vehicle_image")
+  cropImage             String? @map("crop_image")
+  ocrReadyImage         String? @map("ocr_ready_image")
+  rawPlate              Json    @map("raw_plate")
+  scan                  ScanRun @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  @@index([plateNumber], map: "ix_plates_plate_number")
+  @@map("plates")
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique
+  displayName  String   @map("display_name")
+  role         String
+  passwordHash String   @map("password_hash")
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([role], map: "ix_users_role")
+  @@map("users")
+}
+
+model Camera {
+  id          Int      @id @default(autoincrement())
+  host        String   @unique
+  streamUrl   String?  @map("stream_url")
+  label       String?
+  kind        String   @default("ip")
+  deviceIndex Int?     @map("device_index")
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([enabled], map: "ix_cameras_enabled")
+  @@map("cameras")
+}

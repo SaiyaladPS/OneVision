@@ -5,15 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "car-scan"
 version = "0.1.0"
-description = "PyQt6 desktop application for Thai/Lao licence plate scanning"
+description = "Web application for Thai/Lao licence plate scanning"
 requires-python = ">=3.11"
 dependencies = [
-    "PyQt6>=6.7,<7",
     "numpy>=1.26,<3",
     "opencv-python>=4.10,<5",
     "psycopg[binary]>=3.2,<4",
     "ultralytics>=8.3,<9",
     "PyYAML>=6.0,<7",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.32,<1",
+    "websockets>=13,<16",
+    "python-multipart>=0.0.9,<1",
+    "prisma>=0.15,<0.16",
 ]
 
 [project.optional-dependencies]
@@ -21,12 +25,9 @@ ocr = [
     "torch>=2.2",
     "paddleocr>=2.8",
 ]
-build = [
-    "pyinstaller>=6.10",
-]
 
 [project.scripts]
-car-scan = "car_scan.gui:main"
+car-scan-web = "car_scan.web:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -34,3 +35,9 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.prisma]
+schema = "prisma/schema.prisma"
+
+[tool.setuptools.package-data]
+car_scan = ["web_static/**/*"]

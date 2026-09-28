@@ -23,6 +23,7 @@ dist/
 /output/
 /Images/
 /auto/dataset/
+scan/data/ip_cameras.json
 
 # PaddleOCR generated data/output (keep the vendored source and configs)
 /model/paddleocr_train2/train_data/
@@ -64,3 +65,10 @@ dist/
 # Logs and archives generated locally
 *.log
 *.zip
+
+# Prisma Client Python local engines / nodeenv
+.binaries/
+.nodeenv/
+
+all_cvat-compatible/
+/scan/

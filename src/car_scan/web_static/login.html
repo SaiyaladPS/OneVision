@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="th" class="h-full">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Car Scan — เข้าสู่ระบบ</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+Lao:wght@400;500;600;700;800&family=Noto+Sans+Thai:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <script src="/static/tailwind-theme.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/app.css?v=ops17" />
+  </head>
+  <body class="gate-body m-0 h-full bg-desk text-ink">
+    <div class="gate grid min-h-full grid-cols-[minmax(280px,38%)_minmax(0,1fr)] max-[980px]:grid-cols-1">
+      <aside class="rail gate-rail flex flex-col py-12 px-8 text-slate-400">
+        <div class="brand mb-8">
+          <div class="brand-mark text-[28px]"><span class="brand-one">One</span><span class="brand-tech">Vision</span></div>
+          <div class="brand-product">Car Scan</div>
+        </div>
+        <p class="gate-stamp">Technology that moves business forward</p>
+      </aside>
+      <main class="gate-main max-w-[560px] px-12 py-16 max-[980px]:px-5 max-[980px]:py-8">
+        <p class="gate-kicker mb-2 font-bold">เข้าสู่ระบบ</p>
+        <h1 class="mb-2 text-4xl font-bold leading-tight">Car Scan</h1>
+        <p class="hint m-0 text-muted">ใช้บัญชีที่ได้รับสิทธิ์เพื่อตรวจป้ายทะเบียน และเปิดเฉพาะหน้าที่คุณใช้งานได้</p>
+        <form id="loginForm" class="gate-card mt-6 grid gap-4 rounded-gate border border-line bg-panel p-6" autocomplete="on">
+          <label class="grid gap-1.5 font-semibold">ชื่อผู้ใช้
+            <input id="username" name="username" type="text" required autofocus class="rounded-gate border border-line bg-white px-3 py-2.5" />
+          </label>
+          <label class="grid gap-1.5 font-semibold">รหัสผ่าน
+            <input id="password" name="password" type="password" required class="rounded-gate border border-line bg-white px-3 py-2.5" />
+          </label>
+          <button type="submit" class="btn enamel rounded-gate border border-enamel bg-enamel px-3 py-2.5 font-semibold text-white" id="loginBtn">เข้าสู่ระบบ</button>
+          <p id="loginError" class="gate-error m-0 font-semibold text-signal" hidden></p>
+        </form>
+      </main>
+    </div>
+    <script>
+      const form = document.getElementById("loginForm");
+      const errorBox = document.getElementById("loginError");
+      const button = document.getElementById("loginBtn");
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        errorBox.hidden = true;
+        button.disabled = true;
+        try {
+          const response = await fetch("/api/auth/login", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              username: document.getElementById("username").value,
+              password: document.getElementById("password").value,
+            }),
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            errorBox.textContent = data.detail || "เข้าสู่ระบบไม่สำเร็จ";
+            errorBox.hidden = false;
+            button.disabled = false;
+            return;
+          }
+          window.location.href = "/";
+        } catch (error) {
+          errorBox.textContent = String(error);
+          errorBox.hidden = false;
+          button.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
