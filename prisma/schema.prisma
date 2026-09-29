@@ -1,29 +1,26 @@
-// Car Scan database managed by Prisma Client Python (sync).
-// Connection string comes from CAR_SCAN_DATABASE_URL.
+generator client {
+  provider             = "prisma-client-py"
+  recursive_type_depth = "5"
+  interface            = "sync"
+}
 
 datasource db {
   provider = "postgresql"
   url      = env("CAR_SCAN_DATABASE_URL")
 }
 
-generator client {
-  provider             = "prisma-client-py"
-  interface            = "sync"
-  recursive_type_depth = 5
-}
-
 model ScanRun {
   id               BigInt   @id @default(autoincrement())
   sourcePath       String   @map("source_path")
   annotatedImage   String?  @map("annotated_image")
-  outputVideo      String?  @map("output_video")
-  mediaType        String?  @map("media_type")
   plateCount       Int      @default(0) @map("plate_count")
   scannedAt        DateTime @default(now()) @map("scanned_at") @db.Timestamptz(6)
   rawResult        Json     @map("raw_result")
   operatorId       Int?     @map("operator_id")
   operatorName     String?  @map("operator_name")
   operatorUsername String?  @map("operator_username")
+  mediaType        String?  @map("media_type")
+  outputVideo      String?  @map("output_video")
   plates           Plate[]
 
   @@index([scannedAt(sort: Desc)], map: "ix_scan_runs_scanned_at")
@@ -37,23 +34,23 @@ model Plate {
   plateIndex            Int     @map("plate_index")
   country               String  @db.VarChar(16)
   province              String?
-  provinceCode          String? @map("province_code")
   platePrefix           String? @map("plate_prefix")
-  platePrefixCode       String? @map("plate_prefix_code")
   plateNumber           String? @map("plate_number")
   ocrText               String? @map("ocr_text")
   ocrConfidence         Float   @default(0) @map("ocr_confidence")
   detectionConfidence   Float   @default(0) @map("detection_confidence")
-  recognitionConfidence Float?  @map("recognition_confidence")
-  overallConfidence     Float?  @map("overall_confidence")
+  rawPlate              Json    @map("raw_plate")
   confidenceLevel       String? @map("confidence_level")
-  vehicleType           String? @map("vehicle_type")
-  vehicleTypeConfidence Float?  @map("vehicle_type_confidence")
-  plateType             String? @map("plate_type")
-  vehicleImage          String? @map("vehicle_image")
   cropImage             String? @map("crop_image")
   ocrReadyImage         String? @map("ocr_ready_image")
-  rawPlate              Json    @map("raw_plate")
+  overallConfidence     Float?  @map("overall_confidence")
+  platePrefixCode       String? @map("plate_prefix_code")
+  plateType             String? @map("plate_type")
+  provinceCode          String? @map("province_code")
+  recognitionConfidence Float?  @map("recognition_confidence")
+  vehicleImage          String? @map("vehicle_image")
+  vehicleType           String? @map("vehicle_type")
+  vehicleTypeConfidence Float?  @map("vehicle_type_confidence")
   scan                  ScanRun @relation(fields: [scanId], references: [id], onDelete: Cascade)
 
   @@index([plateNumber], map: "ix_plates_plate_number")
@@ -61,29 +58,79 @@ model Plate {
 }
 
 model User {
-  id           Int      @id @default(autoincrement())
-  username     String   @unique
-  displayName  String   @map("display_name")
-  role         String
-  passwordHash String   @map("password_hash")
-  active       Boolean  @default(true)
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  id            Int            @id @default(autoincrement())
+  username      String         @unique
+  displayName   String         @map("display_name")
+  role          String
+  passwordHash  String         @map("password_hash")
+  active        Boolean        @default(true)
+  status        String         @default("ACTIVE")
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  auth_sessions auth_sessions?
+  cameraAccess  CameraAccess[]
 
   @@index([role], map: "ix_users_role")
   @@map("users")
 }
 
 model Camera {
-  id          Int      @id @default(autoincrement())
-  host        String   @unique
-  streamUrl   String?  @map("stream_url")
-  label       String?
-  kind        String   @default("ip")
-  deviceIndex Int?     @map("device_index")
-  enabled     Boolean  @default(true)
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                Int            @id @default(autoincrement())
+  host              String         @unique
+  streamUrl         String?        @map("stream_url")
+  label             String?
+  kind              String         @default("ip")
+  deviceIndex       Int?           @map("device_index")
+  enabled           Boolean        @default(true)
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  roiJson           String?        @map("roi_json")
+  accessPermissions CameraAccess[]
 
   @@index([enabled], map: "ix_cameras_enabled")
   @@map("cameras")
+}
+
+model CameraAccess {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  cameraId  Int      @map("camera_id")
+  canView   Boolean  @default(true) @map("can_view")
+  canScan   Boolean  @default(true) @map("can_scan")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  camera    Camera   @relation(fields: [cameraId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([userId, cameraId], map: "uq_camera_access_user_camera")
+  @@index([userId], map: "ix_camera_access_user_id")
+  @@index([cameraId], map: "ix_camera_access_camera_id")
+  @@map("camera_access")
+}
+
+model auth_sessions {
+  user_id      Int    @id
+  session_hash String
+  expires_at   BigInt
+  users        User   @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model UserRole {
+  code        String   @id
+  name        String
+  permissions Json?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("user_roles")
+}
+
+model UserStatus {
+  code        String   @id
+  name        String
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("user_statuses")
 }

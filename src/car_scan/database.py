@@ -723,6 +723,13 @@ class DatabaseRepository:
 
         ensure_schema(self.database_url)
 
+    def ensure_camera_storage(self) -> None:
+        """Add camera-only fields to an existing database without replacing its schema."""
+
+        self._client().execute_raw(
+            "ALTER TABLE cameras ADD COLUMN IF NOT EXISTS roi_json TEXT"
+        )
+
     def ping(self) -> None:
         self._client().query_raw("SELECT 1")
 
@@ -732,7 +739,7 @@ class DatabaseRepository:
         where = "WHERE enabled = TRUE" if enabled_only else ""
         rows = self._client().query_raw(
             """
-            SELECT id, host, stream_url, label, kind, device_index, enabled,
+            SELECT id, host, stream_url, label, kind, device_index, enabled, roi_json,
                    created_at, updated_at
             FROM cameras
             """ + where + " ORDER BY id ASC"
@@ -746,11 +753,87 @@ class DatabaseRepository:
                 "kind": str(row.get("kind") or "ip"),
                 "device_index": row.get("device_index"),
                 "enabled": bool(row.get("enabled", True)),
+                "roi": self._decode_camera_roi(row.get("roi_json")),
                 "created_at": row.get("created_at"),
                 "updated_at": row.get("updated_at"),
             }
             for row in rows
         ]
+
+    def list_camera_access(self, user_id: int) -> dict[str, dict[str, bool]]:
+        """Return the shared OneVision camera permissions keyed by camera host."""
+
+        rows = self._client().query_raw(
+            """
+            SELECT c.host, ca.can_view, ca.can_scan
+            FROM camera_access AS ca
+            INNER JOIN cameras AS c ON c.id = ca.camera_id
+            WHERE ca.user_id = $1 AND c.enabled = TRUE
+            """,
+            int(user_id),
+        )
+        return {
+            str(row.get("host") or "").strip().lower(): {
+                "can_view": bool(row.get("can_view", False)),
+                "can_scan": bool(row.get("can_scan", False)),
+            }
+            for row in rows
+            if str(row.get("host") or "").strip()
+        }
+
+    @staticmethod
+    def _decode_camera_roi(value: Any) -> dict[str, Any] | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, dict):
+            return value
+        try:
+            decoded = json.loads(str(value))
+        except (TypeError, ValueError):
+            LOGGER.warning("Ignoring invalid saved camera ROI")
+            return None
+        return decoded if isinstance(decoded, dict) else None
+
+    def list_camera_rois(self) -> dict[str, dict[str, Any]]:
+        """Return saved normalized ROI values keyed by camera host."""
+
+        rows = self._client().query_raw(
+            "SELECT host, roi_json FROM cameras WHERE roi_json IS NOT NULL"
+        )
+        rois: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            host = str(row.get("host") or "").strip()
+            roi = self._decode_camera_roi(row.get("roi_json"))
+            if host and roi is not None:
+                rois[host] = roi
+        return rois
+
+    def set_camera_roi(
+        self,
+        host: str,
+        roi: dict[str, Any] | None,
+        *,
+        stream_url: str = "",
+    ) -> None:
+        """Persist one camera ROI without overwriting its stream settings."""
+
+        wanted = str(host or "").strip()
+        if not wanted:
+            raise ValueError("camera host is required")
+        encoded = json.dumps(roi, ensure_ascii=False, separators=(",", ":")) if roi is not None else None
+        self._client().execute_raw(
+            """
+            INSERT INTO cameras (host, stream_url, roi_json, updated_at)
+            VALUES ($1, NULLIF($2, ''), $3, CURRENT_TIMESTAMP)
+            ON CONFLICT (host) DO UPDATE SET
+                stream_url = COALESCE(NULLIF(EXCLUDED.stream_url, ''), cameras.stream_url),
+                roi_json = EXCLUDED.roi_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            wanted,
+            str(stream_url or ""),
+            encoded,
+        )
 
     def upsert_camera(
         self,
@@ -769,8 +852,8 @@ class DatabaseRepository:
             raise ValueError("camera host is required")
         self._client().execute_raw(
             """
-            INSERT INTO cameras (host, stream_url, label, kind, device_index, enabled)
-            VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, $6)
+            INSERT INTO cameras (host, stream_url, label, kind, device_index, enabled, updated_at)
+            VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, $6, CURRENT_TIMESTAMP)
             ON CONFLICT (host) DO UPDATE SET
                 stream_url = COALESCE(NULLIF(EXCLUDED.stream_url, ''), cameras.stream_url),
                 label = CASE WHEN $3 IS NULL THEN cameras.label ELSE NULLIF($3, '') END,

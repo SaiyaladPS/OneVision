@@ -52,10 +52,50 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     active BOOLEAN NOT NULL DEFAULT TRUE,
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS ix_users_role ON users (role);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ACTIVE';
+UPDATE users SET status = CASE WHEN active THEN 'ACTIVE' ELSE 'INACTIVE' END WHERE status IS NULL OR status = '';
+UPDATE users SET role = CASE LOWER(role)
+    WHEN 'admin' THEN 'ADMIN'
+    WHEN 'operator' THEN 'EDITOR'
+    WHEN 'viewer' THEN 'USER'
+    WHEN 'superuser' THEN 'SUPERUSER'
+    ELSE UPPER(role)
+END;
+
+CREATE TABLE IF NOT EXISTS user_roles (
+    code TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    permissions JSONB,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_statuses (
+    code TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO user_roles (code, name, permissions) VALUES
+    ('ADMIN', 'Administrator', '["scan.image","scan.video","scan.camera","results.save","users.manage"]'::jsonb),
+    ('EDITOR', 'Editor', '["scan.image","scan.video","scan.camera","results.save"]'::jsonb),
+    ('USER', 'User', '[]'::jsonb),
+    ('SUPERUSER', 'Super User', '["*"]'::jsonb)
+ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, permissions = EXCLUDED.permissions, active = TRUE, updated_at = CURRENT_TIMESTAMP;
+
+INSERT INTO user_statuses (code, name) VALUES
+    ('ACTIVE', 'Active'), ('INACTIVE', 'Inactive'), ('SUSPENDED', 'Suspended')
+ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, active = TRUE, updated_at = CURRENT_TIMESTAMP;
+
+CREATE INDEX IF NOT EXISTS ix_users_status ON users (status);
 
 CREATE TABLE IF NOT EXISTS cameras (
     id SERIAL PRIMARY KEY,
@@ -65,8 +105,10 @@ CREATE TABLE IF NOT EXISTS cameras (
     kind TEXT NOT NULL DEFAULT 'ip',
     device_index INTEGER,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    roi_json TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS ix_cameras_enabled ON cameras (enabled);
+ALTER TABLE cameras ADD COLUMN IF NOT EXISTS roi_json TEXT;

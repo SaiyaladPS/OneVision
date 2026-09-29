@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -30,6 +31,7 @@ from .auth import (
     COOKIE_NAME,
     clear_session_cookie,
     current_user,
+    canonical_role,
     has_permission,
     public_user,
     require_permission,
@@ -65,7 +67,7 @@ from .database import (
 )
 from .service import ScanService
 from .worker import WorkerPool
-from .realtime import serve_websocket
+from .realtime import event_hub, publish_roi_event, serve_websocket
 
 STATIC_DIR = Path(__file__).resolve().parent / "web_static"
 ALLOWED_IMAGE = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -211,7 +213,7 @@ def _report_payload(
     if not settings.database_url:
         return empty
     try:
-        repository = _scan_repository(settings)
+        repository = DatabaseRepository(settings.database_url)
         rows = repository.list_scans_in_range(
             start,
             end,
@@ -334,8 +336,9 @@ def _serve_plate_image(request: Request, scan_id: int, plate_id: int, kind: str)
 
 
 def _serve_worker_plate_image(request: Request, host: str, plate_id: int, kind: str) -> FileResponse:
-    require_user(request)
+    user = require_user(request)
     settings = Settings.from_env()
+    _require_camera_view_or_scan(settings, user, host)
     raw = _worker().plate_image(host, plate_id, kind)
     path = _safe_scan_image(settings, raw)
     if path is None:
@@ -481,6 +484,24 @@ def reset_runtime_state() -> None:
         worker.stop_all()
 
 
+def _shutdown_runtime_state() -> None:
+    """Flush camera persistence before Uvicorn/Prisma shuts down."""
+
+    global _WORKER
+    with _WORKER_LOCK:
+        worker = _WORKER
+        _WORKER = None
+    if worker is not None:
+        worker.persist_rois()
+        worker.stop_all(wait=True)
+    try:
+        from .prisma_db import disconnect
+
+        disconnect()
+    except Exception:
+        LOGGER.exception("Unable to close Prisma client cleanly")
+
+
 def _resolve_camera(settings: Settings, raw: str) -> tuple[str, str]:
     cameras = _camera_urls(settings)
     camera_url = resolve_camera_url(raw, cameras)
@@ -621,7 +642,8 @@ def _camera_records(settings: Settings) -> list[dict[str, Any]]:
             for item in legacy
         ]
     try:
-        repository = _scan_repository(settings)
+        repository = DatabaseRepository(settings.database_url)
+        repository.ensure_camera_storage()
         rows = repository.list_cameras(enabled_only=False)
         known = {str(item["host"]).lower() for item in rows}
         first_database_boot = not rows
@@ -709,7 +731,8 @@ def _save_camera_record(
     local = parse_local_camera(url) or parse_local_camera(host)
     if settings.database_url:
         try:
-            repository = _scan_repository(settings)
+            repository = DatabaseRepository(settings.database_url)
+            repository.ensure_camera_storage()
             repository.upsert_camera(
                 host,
                 url,
@@ -727,7 +750,9 @@ def _save_camera_record(
 def _delete_camera_record(settings: Settings, host: str) -> None:
     if settings.database_url:
         try:
-            _scan_repository(settings).delete_camera(host)
+            repository = DatabaseRepository(settings.database_url)
+            repository.ensure_camera_storage()
+            repository.delete_camera(host)
             return
         except Exception:
             LOGGER.exception("Unable to delete CCTV setting from PostgreSQL")
@@ -735,14 +760,103 @@ def _delete_camera_record(settings: Settings, host: str) -> None:
     remove_extra_camera_host(settings.output_dir, host)
 
 
-def _camera_payload(settings: Settings) -> list[dict[str, Any]]:
+def _camera_permissions(settings: Settings, user: dict[str, Any]) -> dict[str, dict[str, bool]] | None:
+    """Read shared camera permissions; administrators retain full access."""
+
+    if canonical_role(user.get("role")) in {"admin", "superuser"}:
+        return None
+    if not settings.database_url:
+        # A standalone/file-backed deployment has no shared access table. Keep
+        # the existing role-level camera permission for operators, but never
+        # grant camera access to viewer accounts implicitly.
+        return None if has_permission(user, "scan.camera") else {}
+    try:
+        return DatabaseRepository(settings.database_url).list_camera_access(int(user["id"]))
+    except Exception:
+        LOGGER.exception("Unable to read shared CCTV permissions")
+        return {}
+
+
+def _require_camera_access(
+    settings: Settings,
+    user: dict[str, Any],
+    host: str,
+    capability: str,
+) -> dict[str, bool] | None:
+    permissions = _camera_permissions(settings, user)
+    if permissions is None:
+        return None
+    permission = permissions.get(str(host or "").strip().lower())
+    if not permission or not permission.get(capability, False):
+        action = "ดูภาพ" if capability == "can_view" else "สแกน"
+        raise HTTPException(status_code=403, detail=f"บัญชีนี้ไม่มีสิทธิ์{action}กล้อง {host}")
+    return permission
+
+
+def _camera_has_access(settings: Settings, user: dict[str, Any], host: str, capability: str) -> bool:
+    permissions = _camera_permissions(settings, user)
+    return permissions is None or bool(permissions.get(str(host or "").strip().lower(), {}).get(capability, False))
+
+
+def _require_camera_view_or_scan(settings: Settings, user: dict[str, Any], host: str) -> None:
+    permissions = _camera_permissions(settings, user)
+    if permissions is None:
+        return
+    permission = permissions.get(str(host or "").strip().lower())
+    if not permission or not (permission.get("can_view") or permission.get("can_scan")):
+        raise HTTPException(status_code=403, detail=f"บัญชีนี้ไม่มีสิทธิ์เข้าถึงกล้อง {host}")
+
+
+def _require_camera_stop_access(settings: Settings, user: dict[str, Any], host: str) -> None:
+    if has_permission(user, "scan.camera"):
+        return
+    _require_camera_access(settings, user, host, "can_view")
+    lane = _worker().get(host)
+    if lane is None or int(getattr(lane, "operator_id", -1) or -1) != int(user["id"]):
+        raise HTTPException(status_code=403, detail=f"บัญชีนี้ไม่ใช่ผู้เปิด preview ของกล้อง {host}")
+
+
+def _camera_payload(settings: Settings, user: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     cameras = public_cameras(_camera_urls(settings), _builtin_hosts(settings))
-    labels = {str(item["host"]).lower(): item.get("label", "") for item in _camera_records(settings)}
+    records = _camera_records(settings)
+    labels = {str(item["host"]).lower(): item.get("label", "") for item in records}
+    rois = {str(item["host"]).lower(): item.get("roi") for item in records if item.get("roi")}
     for camera in cameras:
         custom_label = labels.get(camera["host"].lower()) or ""
         camera["label"] = custom_label or camera["label"]
         camera["custom_label"] = bool(custom_label)
-    return cameras
+        saved_roi = rois.get(camera["host"].lower())
+        if isinstance(saved_roi, dict):
+            camera["roi"] = saved_roi
+    if user is None:
+        return cameras
+    permissions = _camera_permissions(settings, user)
+    for camera in cameras:
+        permission = permissions.get(str(camera["host"]).lower(), {}) if permissions is not None else {}
+        camera["can_view"] = permissions is None or bool(permission.get("can_view", False))
+        camera["can_scan"] = permissions is None or bool(permission.get("can_scan", False))
+    return [camera for camera in cameras if camera.get("can_view")]
+
+
+def _filter_worker_snapshot(
+    snapshot: dict[str, Any],
+    settings: Settings,
+    user: dict[str, Any],
+) -> dict[str, Any]:
+    """Remove worker lanes and plates outside the current user's camera scope."""
+
+    visible = {str(item["host"]).lower() for item in _camera_payload(settings, user)}
+    result = dict(snapshot)
+    cameras = [
+        item for item in snapshot.get("cameras") or []
+        if str(item.get("host") or "").lower() in visible
+    ]
+    result["cameras"] = cameras
+    result["plates"] = [
+        item for item in snapshot.get("plates") or []
+        if str(item.get("camera_host") or "").lower() in visible
+    ]
+    return result
 
 
 def _camera_response(settings: Settings, cameras: list[dict[str, Any]]) -> dict[str, Any]:
@@ -831,14 +945,19 @@ def _get_job(job_id: str, user: dict[str, Any] | None = None) -> ScanJob:
         job = _JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="ไม่พบงานสแกน")
-    if user is not None and job.owner_id not in (None, int(user["id"])) and str(user.get("role")) != "admin":
+    if user is not None and job.owner_id not in (None, int(user["id"])) and canonical_role(user.get("role")) not in {"admin", "superuser"}:
         raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ดูงานสแกนนี้")
     return job
 
 
 def create_app() -> FastAPI:
     max_upload = _max_upload_bytes()
-    app = FastAPI(title="Car Scan", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        await run_in_threadpool(_shutdown_runtime_state)
+
+    app = FastAPI(title="Car Scan", version="0.1.0", lifespan=lifespan)
     app.state.auth = AuthStore.from_env()
     app.add_middleware(RequestBodyLimitMiddleware, max_body_size=max_upload)
     if STATIC_DIR.is_dir():
@@ -870,9 +989,10 @@ def create_app() -> FastAPI:
         return FileResponse(page)
 
     @app.get("/api/health")
-    def health() -> dict[str, Any]:
+    def health(request: Request) -> dict[str, Any]:
+        user = require_user(request)
         settings = Settings.from_env()
-        cameras = _camera_payload(settings)
+        cameras = _camera_payload(settings, user)
         database = "missing"
         if settings.database_url:
             try:
@@ -880,7 +1000,7 @@ def create_app() -> FastAPI:
                 database = "ok"
             except Exception as error:
                 database = f"error: {error}"
-        worker = _worker().snapshot()
+        worker = _filter_worker_snapshot(_worker().snapshot(), settings, user)
         gpu = worker.get("gpu") or {}
         return {
             "ok": True,
@@ -905,17 +1025,35 @@ def create_app() -> FastAPI:
 
     @app.websocket("/ws")
     async def onevision_websocket(websocket: WebSocket):
-        user = websocket.app.state.auth.read_session(websocket.cookies.get(COOKIE_NAME))
-        if user is None:
+        store: AuthBackend = websocket.app.state.auth
+        token = websocket.cookies.get(COOKIE_NAME)
+        user = store.read_session(token)
+        session_id = store.session_id(token)
+        if user is None or not session_id:
             await websocket.close(code=1008)
             return
-        await serve_websocket(websocket)
+        await serve_websocket(
+            websocket,
+            user_id=int(user["id"]),
+            session_id=session_id,
+            worker_snapshot_filter=lambda snapshot: _filter_worker_snapshot(
+                snapshot,
+                Settings.from_env(),
+                user,
+            ),
+            camera_event_filter=lambda host: _camera_has_access(
+                Settings.from_env(),
+                user,
+                host,
+                "can_view",
+            ),
+        )
 
     @app.get("/api/cameras")
     def list_cameras(request: Request) -> dict[str, Any]:
-        require_user(request)
+        user = require_user(request)
         settings = Settings.from_env()
-        return _camera_response(settings, _camera_payload(settings))
+        return _camera_response(settings, _camera_payload(settings, user))
 
     @app.post("/api/cameras")
     async def add_camera(request: Request) -> JSONResponse:
@@ -1026,8 +1164,9 @@ def create_app() -> FastAPI:
 
     @app.get("/api/worker")
     def worker_status(request: Request) -> dict[str, Any]:
-        require_user(request)
-        return _worker().snapshot()
+        user = require_user(request)
+        settings = Settings.from_env()
+        return _filter_worker_snapshot(_worker().snapshot(), settings, user)
 
     @app.post("/api/worker/compute")
     async def worker_set_compute(request: Request) -> JSONResponse:
@@ -1042,7 +1181,7 @@ def create_app() -> FastAPI:
         if not mode:
             raise HTTPException(status_code=400, detail="เลือก auto, gpu, cpu หรือ hybrid")
         snapshot = await run_in_threadpool(_worker().set_compute, mode)
-        return JSONResponse(snapshot)
+        return JSONResponse(_filter_worker_snapshot(snapshot, Settings.from_env(), user))
 
     @app.post("/api/worker/start")
     async def worker_start_camera(request: Request) -> JSONResponse:
@@ -1056,6 +1195,7 @@ def create_app() -> FastAPI:
         settings = Settings.from_env()
         raw = str((payload or {}).get("host") or (payload or {}).get("url") or "").strip()
         camera_url, host = _resolve_camera(settings, raw)
+        _require_camera_access(settings, user, host, "can_scan")
         roi = _coerce_roi((payload or {}).get("roi"))
         status = await run_in_threadpool(lambda: _start_lane(camera_url, host, user, True, None, roi))
         return JSONResponse(status)
@@ -1071,6 +1211,20 @@ def create_app() -> FastAPI:
             payload = {}
         settings = Settings.from_env()
         cameras = _camera_pairs(settings)
+        permissions = _camera_permissions(settings, user)
+        if permissions is not None:
+            cameras = [
+                (url, host)
+                for url, host in cameras
+                if permissions.get(host.lower(), {}).get("can_scan", False)
+            ]
+        requested_hosts = {
+            str(item or "").strip().lower()
+            for item in ((payload or {}).get("hosts") or [])
+            if str(item or "").strip()
+        }
+        if requested_hosts:
+            cameras = [(url, host) for url, host in cameras if host.lower() in requested_hosts]
         if not cameras:
             raise HTTPException(status_code=400, detail="ยังไม่มีกล้องในรายการ")
         fields = _operator_fields(user)
@@ -1084,7 +1238,7 @@ def create_app() -> FastAPI:
             return _worker().start_all(cameras, scan=True, roi=roi, rois=rois, **fields)
 
         snapshot = await run_in_threadpool(boot)
-        return JSONResponse(snapshot)
+        return JSONResponse(_filter_worker_snapshot(snapshot, settings, user))
 
     @app.post("/api/worker/roi")
     async def worker_set_roi(request: Request) -> JSONResponse:
@@ -1096,12 +1250,18 @@ def create_app() -> FastAPI:
         except Exception:
             payload = {}
         host = str((payload or {}).get("host") or "").strip()
+        if not host:
+            raise HTTPException(status_code=400, detail="ระบุ IP กล้องที่ต้องการตั้งกรอบสแกน")
+        _require_camera_access(Settings.from_env(), user, host, "can_scan")
         roi = _coerce_roi((payload or {}).get("roi"))
-        return JSONResponse(_worker().set_roi(host, roi))
+        worker = _worker()
+        result = await run_in_threadpool(worker.set_roi, host, roi)
+        publish_roi_event(host, roi, user=user)
+        return JSONResponse(result)
 
     @app.post("/api/worker/stop")
     async def worker_stop_camera(request: Request, host: str = Query("")) -> dict[str, Any]:
-        require_user(request)
+        user = require_user(request)
         try:
             payload = await request.json()
         except Exception:
@@ -1109,11 +1269,14 @@ def create_app() -> FastAPI:
         target = str(host or (payload or {}).get("host") or "").strip()
         if not target:
             raise HTTPException(status_code=400, detail="ระบุ IP กล้องที่ต้องการปิด")
+        _require_camera_stop_access(Settings.from_env(), user, target)
         return await run_in_threadpool(_worker().stop_camera, target)
 
     @app.post("/api/worker/stop-all")
     async def worker_stop_all(request: Request) -> dict[str, Any]:
-        require_user(request)
+        user = require_user(request)
+        if not has_permission(user, "scan.camera"):
+            raise HTTPException(status_code=403, detail="บัญชีนี้ไม่มีสิทธิ์ปิดการสแกนกล้องทั้งหมด")
         await run_in_threadpool(_worker().stop_all)
         return {"ok": True, "cameras": []}
 
@@ -1127,8 +1290,11 @@ def create_app() -> FastAPI:
 
     @app.get("/api/cameras/live")
     def live_status(request: Request, host: str = Query("")) -> dict[str, Any]:
-        require_user(request)
-        snapshot = _worker().snapshot()
+        user = require_user(request)
+        settings = Settings.from_env()
+        if host:
+            _require_camera_access(settings, user, host, "can_view")
+        snapshot = _filter_worker_snapshot(_worker().snapshot(), settings, user)
         if host:
             lane = next((item for item in snapshot["cameras"] if item.get("host") == host), None)
             if lane is None:
@@ -1140,16 +1306,21 @@ def create_app() -> FastAPI:
 
     @app.get("/api/cameras/live.jpg")
     def live_frame(request: Request, host: str = Query("")) -> Response:
-        require_user(request)
-        jpeg = _live_lane(host).jpeg
+        user = require_user(request)
+        settings = Settings.from_env()
+        lane = _live_lane(host)
+        _require_camera_access(settings, user, lane.host or host, "can_view")
+        jpeg = lane.jpeg
         if not jpeg:
             raise HTTPException(status_code=404, detail="ยังไม่ได้เปิดกล้อง")
         return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/cameras/live.mjpeg")
     def live_mjpeg(request: Request, host: str = Query("")) -> StreamingResponse:
-        require_user(request)
+        user = require_user(request)
+        settings = Settings.from_env()
         lane = _live_lane(host)
+        _require_camera_access(settings, user, lane.host or host, "can_view")
         return StreamingResponse(
             _iter_mjpeg(lane),
             media_type="multipart/x-mixed-replace; boundary=frame",
@@ -1163,8 +1334,6 @@ def create_app() -> FastAPI:
     @app.post("/api/cameras/live")
     async def open_live(request: Request) -> JSONResponse:
         user = require_user(request)
-        if not has_permission(user, "scan.camera"):
-            raise HTTPException(status_code=403, detail="บัญชีนี้ไม่มีสิทธิ์เปิดกล้อง")
         try:
             payload = await request.json()
         except Exception:
@@ -1172,27 +1341,33 @@ def create_app() -> FastAPI:
         settings = Settings.from_env()
         raw = str((payload or {}).get("host") or (payload or {}).get("url") or "").strip()
         camera_url, host = _resolve_camera(settings, raw)
+        _require_camera_access(settings, user, host, "can_view")
         roi = _coerce_roi((payload or {}).get("roi"))
-        status = await run_in_threadpool(lambda: _start_lane(camera_url, host, user, True, None, roi))
+        status = await run_in_threadpool(lambda: _start_lane(camera_url, host, user, False, None, roi))
         return JSONResponse(status)
 
     @app.post("/api/cameras/live/stop")
     async def stop_live(request: Request, host: str = Query("")) -> dict[str, Any]:
-        require_user(request)
+        user = require_user(request)
         try:
             payload = await request.json()
         except Exception:
             payload = {}
         target = str(host or (payload or {}).get("host") or "").strip()
         if target:
+            _require_camera_stop_access(Settings.from_env(), user, target)
             return await run_in_threadpool(_worker().stop_camera, target)
+        if not has_permission(user, "scan.camera"):
+            raise HTTPException(status_code=403, detail="บัญชีนี้ไม่มีสิทธิ์ปิดกล้องทั้งหมด")
         await run_in_threadpool(_worker().stop_all)
         return {"ok": True, "opened": False}
 
     @app.get("/api/cameras/live/snapshot.jpg")
     def live_snapshot(request: Request, host: str = Query("")) -> Response:
-        require_user(request)
+        user = require_user(request)
+        settings = Settings.from_env()
         lane = _live_lane(host)
+        _require_camera_access(settings, user, lane.host or host, "can_view")
         jpeg = lane.snapshot_jpeg()
         if not jpeg:
             raise HTTPException(status_code=404, detail="ยังไม่มีภาพจากกล้อง")
@@ -1207,12 +1382,14 @@ def create_app() -> FastAPI:
         user = require_user(request)
         if not has_permission(user, "scan.camera"):
             raise HTTPException(status_code=403, detail="บัญชีนี้ไม่มีสิทธิ์อัดกล้อง")
+        settings = Settings.from_env()
         lane = _open_lane(host) if host else None
         if lane is None:
             lanes = list(_worker().hub.lanes.values())
             lane = lanes[0] if len(lanes) == 1 else None
         if lane is None:
             raise HTTPException(status_code=404, detail="ยังไม่ได้เปิดกล้อง")
+        _require_camera_access(settings, user, lane.host or host, "can_scan")
         try:
             path = lane.start_recording()
         except RuntimeError as error:
@@ -1221,13 +1398,15 @@ def create_app() -> FastAPI:
 
     @app.post("/api/cameras/live/record/stop")
     def stop_live_record(request: Request, host: str = Query("")) -> FileResponse:
-        require_user(request)
+        user = require_user(request)
+        settings = Settings.from_env()
         lane = _open_lane(host) if host else None
         if lane is None:
             lanes = [item for item in _worker().hub.lanes.values() if item.recording]
             lane = lanes[0] if lanes else None
         if lane is None:
             raise HTTPException(status_code=404, detail="ยังไม่ได้เปิดกล้อง")
+        _require_camera_access(settings, user, lane.host or host, "can_scan")
         try:
             path = lane.stop_recording()
         except RuntimeError as error:
@@ -1244,16 +1423,32 @@ def create_app() -> FastAPI:
         password = str(payload.get("password") or "")
         store: AuthBackend = request.app.state.auth
         user = store.authenticate(username, password)
+        token = store.issue_session(user)
+        session_id = store.session_id(token)
+        if session_id:
+            event_hub.close_user_sessions(int(user["id"]), keep_session_id=session_id)
         response = JSONResponse(public_user(user))
-        return set_session_cookie(response, store.issue_session(user))
+        return set_session_cookie(response, token)
 
     @app.post("/api/auth/logout")
-    def logout() -> JSONResponse:
+    def logout(request: Request) -> JSONResponse:
+        store: AuthBackend = request.app.state.auth
+        token = request.cookies.get(COOKIE_NAME)
+        user = store.read_session(token)
+        store.revoke_session(token)
+        if user is not None:
+            event_hub.close_user_sessions(int(user["id"]))
         return clear_session_cookie(JSONResponse({"ok": True}))
 
     @app.get("/api/auth/me")
     def me(request: Request) -> dict[str, Any]:
         return public_user(require_user(request))
+
+    @app.get("/api/auth/catalog")
+    def auth_catalog(request: Request) -> dict[str, Any]:
+        require_user(request)
+        store: AuthBackend = request.app.state.auth
+        return store.list_catalog()
 
     @app.post("/api/auth/password")
     async def change_password(request: Request) -> dict[str, Any]:
@@ -1301,6 +1496,9 @@ def create_app() -> FastAPI:
             password=str(payload["password"]) if payload.get("password") else None,
             active=bool(payload["active"]) if "active" in payload else None,
         )
+        if any(key in payload for key in ("role", "password", "active")):
+            store.revoke_user_sessions(user_id)
+            event_hub.close_user_sessions(user_id)
         return public_user(user)
 
     @app.delete("/api/users/{user_id}")
@@ -1308,7 +1506,10 @@ def create_app() -> FastAPI:
         actor = require_permission(request, "users.manage")
         if int(actor["id"]) == user_id:
             raise HTTPException(status_code=400, detail="ลบบัญชีของตนเองไม่ได้")
-        request.app.state.auth.delete_user(user_id)
+        store: AuthBackend = request.app.state.auth
+        store.revoke_user_sessions(user_id)
+        event_hub.close_user_sessions(user_id)
+        store.delete_user(user_id)
         return {"ok": True}
 
     @app.get("/api/reports")
@@ -1492,8 +1693,9 @@ def create_app() -> FastAPI:
         if media_type == "camera":
             camera_ref = str(form.get("camera_url") or form.get("camera_host") or "").strip()
             camera_url, host = _resolve_camera(settings, camera_ref)
+            _require_camera_access(settings, user, host, "can_scan")
             status = await run_in_threadpool(lambda: _start_lane(camera_url, host, user, True, None, roi_config))
-            snapshot = _worker().snapshot()
+            snapshot = _filter_worker_snapshot(_worker().snapshot(), settings, user)
             return JSONResponse(
                 {
                     "id": f"cam-{host}",
@@ -1622,7 +1824,14 @@ def main() -> int:
         return 1
     host = os.getenv("CAR_SCAN_WEB_HOST", "127.0.0.1")
     port = int(os.getenv("CAR_SCAN_WEB_PORT", "8000"))
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    graceful_shutdown = max(1, int(os.getenv("CAR_SCAN_WEB_GRACEFUL_SHUTDOWN_SECONDS", "3")))
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        timeout_graceful_shutdown=graceful_shutdown,
+    )
     return 0
 
 

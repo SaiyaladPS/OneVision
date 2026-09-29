@@ -25,9 +25,10 @@ INFER_MAX_DIMENSION = 1920
 PREVIEW_FPS = 12.0
 PREVIEW_MAX_DIMENSION = 640
 PREVIEW_QUALITY = 62
-CAMERA_READY_TIMEOUT_SECONDS = 60.0
 FIRST_FRAME_READ_ATTEMPTS = 4
 FIRST_FRAME_READ_DELAY_SECONDS = 0.20
+STOP_JOIN_TIMEOUT_SECONDS = 0.05
+SHUTDOWN_JOIN_TIMEOUT_SECONDS = 1.5
 # Capture submits at most this often; the hub already keeps only the latest
 # pending frame per lane, so extra decodes only make the live view hitch.
 IDLE_SUBMIT_GAP = 0.28
@@ -306,6 +307,8 @@ class CameraLane:
     seq: int = 0
     error: str = ""
     opened: bool = False
+    starting: bool = False
+    stopping: bool = False
     scanning: bool = True
     recording: bool = False
     record_path: Path | None = None
@@ -315,6 +318,7 @@ class CameraLane:
     frame_index: int = 0
     sampled_frames: int = 0
     capture_thread: threading.Thread | None = None
+    capture: Any = None
     roi: dict[str, Any] | None = None
     last_detect_count: int = 0
     fps: float = 0.0
@@ -322,6 +326,7 @@ class CameraLane:
     # been confirmed yet; the hub and the capture loop sample it more often.
     hot_until: float = 0.0
     last_infer_at: float = 0.0
+    session_finished: bool = False
 
     @property
     def hot(self) -> bool:
@@ -365,6 +370,8 @@ class CameraLane:
                 "host": self.host,
                 "label": self.label,
                 "live": self.opened,
+                "starting": self.starting,
+                "stopping": self.stopping,
                 "scanning": self.scanning and self.opened,
                 "recording": self.recording,
                 "seq": self.seq,
@@ -380,37 +387,57 @@ class CameraLane:
             }
 
     def start(self) -> None:
+        with self.lock:
+            self.starting = True
+            self.error = ""
         self.capture_thread = threading.Thread(
             target=self._capture_loop,
             daemon=True,
             name=f"cctv-{self.host}",
         )
         self.capture_thread.start()
-        if not self.ready.wait(timeout=CAMERA_READY_TIMEOUT_SECONDS):
-            self.error = self.error or (
-                f"กล้อง {self.host} ยังไม่ส่งภาพภายใน "
-                f"{int(CAMERA_READY_TIMEOUT_SECONDS)} วินาที — ตรวจสอบ IP, RTSP path, user/password "
-                "และให้เครื่องที่รัน OneVision อยู่เครือข่ายเดียวกับกล้อง"
-            )
-            raise RuntimeError(self.error)
 
-    def stop_lane(self) -> None:
-        self.stop.set()
-        thread = self.capture_thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=4.0)
-        writer = None
+    def _finish_session(self) -> None:
         with self.lock:
-            writer = self.writer
-            self.writer = None
-            self.recording = False
-            self.opened = False
-        if writer is not None:
-            writer.release()
+            if self.session_finished:
+                return
+            self.session_finished = True
         try:
             self.persister.finish({"media_type": "camera", "plates": self.plates, "plate_count": len(self.plates)})
         except Exception:
             LOGGER.exception("finish live persist for %s", self.host)
+
+    def stop_lane(self, *, timeout: float | None = None) -> None:
+        self.stop.set()
+        thread = self.capture_thread
+        writer = None
+        capture = None
+        with self.lock:
+            writer = self.writer
+            self.writer = None
+            capture = self.capture
+            self.recording = False
+            self.opened = False
+            self.starting = False
+            self.stopping = True
+        if writer is not None:
+            writer.release()
+        # Release the decoder as well as signalling the loop.  RTSP reads can
+        # otherwise remain blocked long enough for a quick off/on action to
+        # create a second connection for the same camera.
+        if capture is not None:
+            try:
+                capture.release()
+            except Exception:
+                LOGGER.debug("release capture while stopping %s", self.host, exc_info=True)
+        # Return quickly. A blocking RTSP read or decoder shutdown must not
+        # hold the HTTP request; the capture thread cleans up in finally.
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=STOP_JOIN_TIMEOUT_SECONDS if timeout is None else max(0.0, timeout))
+        if thread is None or not thread.is_alive():
+            with self.lock:
+                self.stopping = False
+            self._finish_session()
 
     def start_recording(self) -> Path:
         with self.lock:
@@ -557,13 +584,35 @@ class CameraLane:
         return _encode_jpeg(frame, max_dimension=1600, quality=86) or fallback
 
     def _capture_loop(self) -> None:
-        capture, opened_url, first_frame = _open_capture(self.url)
+        try:
+            capture, opened_url, first_frame = _open_capture(self.url)
+        except Exception as error:
+            with self.lock:
+                self.starting = False
+                self.stopping = False
+                self.error = f"เปิดกล้อง {self.host} ไม่ได้: {error}"
+            self.ready.set()
+            self._finish_session()
+            self.hub.notify_update("camera state changed")
+            return
+        with self.lock:
+            self.capture = capture
+        if self.stop.is_set():
+            capture.release()
+            with self.lock:
+                self.capture = None
+                self.starting = False
+                self.stopping = False
+            self.ready.set()
+            self._finish_session()
+            self.hub.notify_update("camera state changed")
+            return
         if opened_url and opened_url != self.url:
             self.url = opened_url
             try:
                 if self.settings.database_url:
                     repository = DatabaseRepository(self.settings.database_url)
-                    repository.initialize_schema()
+                    repository.ensure_camera_storage()
                     local = parse_local_camera(opened_url)
                     repository.upsert_camera(
                         self.host,
@@ -585,8 +634,14 @@ class CameraLane:
                         "และ path RTSP ของยี่ห้อกล้องนั้น"
                     )
                 )
+                self.starting = False
+                self.stopping = False
             self.ready.set()
             capture.release()
+            with self.lock:
+                self.capture = None
+            self._finish_session()
+            self.hub.notify_update("camera state changed")
             return
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0) or 15.0
         if fps > 120.0:
@@ -623,8 +678,11 @@ class CameraLane:
                         capture.release()
                         with self.lock:
                             self.error = "หน่วยความจำไม่พอสำหรับภาพกล้อง; กำลังเปิด stream ใหม่"
-                        time.sleep(0.5)
+                        if self.stop.wait(0.5):
+                            break
                         capture, opened_url, replacement = _open_capture(self.url)
+                        with self.lock:
+                            self.capture = capture
                         if not capture.isOpened() or replacement is None:
                             with self.lock:
                                 self.error = "หน่วยความจำไม่พอหรือเปิด stream กล้องใหม่ไม่ได้"
@@ -665,6 +723,7 @@ class CameraLane:
                         self.jpeg = preview
                         self.seq += 1
                     self.opened = True
+                    self.starting = False
                     self.error = ""
                     if self.recording:
                         if self.writer is None and self.record_path is not None:
@@ -684,7 +743,7 @@ class CameraLane:
                         frame,
                         max(640, int(self.settings.camera_infer_max_dimension)),
                     )
-                    self.hub.submit(self.host, infer_frame, index)
+                    self.hub.submit(self.host, infer_frame, index, lane=self)
                     last_submit = now
         finally:
             capture.release()
@@ -692,9 +751,13 @@ class CameraLane:
             with self.lock:
                 leftover = self.writer
                 self.writer = None
+                self.capture = None
                 self.opened = False
+                self.starting = False
+                self.stopping = False
             if leftover is not None:
                 leftover.release()
+            self._finish_session()
             self.hub.notify_update("camera state changed")
             self.ready.set()
 
@@ -719,7 +782,7 @@ class GpuHub:
         self._load_lock = threading.Lock()
         self.infer_lock = threading.Lock()
         self.pending_lock = threading.Lock()
-        self.pending: dict[str, tuple[Any, int]] = {}
+        self.pending: dict[str, tuple[Any, int, Any]] = {}
         self.lanes: dict[str, CameraLane] = {}
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self._loop, daemon=True, name="gpu-hub")
@@ -750,6 +813,19 @@ class GpuHub:
         if not self.cpu_thread.is_alive():
             self.cpu_thread = threading.Thread(target=self._cpu_loop, daemon=True, name="cpu-hub")
             self.cpu_thread.start()
+
+    def shutdown(self, timeout: float = SHUTDOWN_JOIN_TIMEOUT_SECONDS) -> None:
+        """Stop inference threads before the process closes the Prisma engine."""
+
+        self.stop.set()
+        with self.pending_lock:
+            self.pending.clear()
+        deadline = time.monotonic() + max(0.0, timeout)
+        for thread in (self.thread, self.ocr_thread, self.cpu_thread):
+            if thread is threading.current_thread() or not thread.is_alive():
+                continue
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(timeout=remaining)
 
     def ensure_loaded(self) -> None:
         with self._load_lock:
@@ -803,12 +879,18 @@ class GpuHub:
             self.plan = plan
         return bool(plan.hybrid_cpu_yolo)
 
-    def submit(self, host: str, frame: Any, frame_index: int) -> None:
+    def submit(self, host: str, frame: Any, frame_index: int, *, lane: Any = None) -> None:
         with self.pending_lock:
+            current_lane = self.lanes.get(host)
+            if current_lane is None or (lane is not None and current_lane is not lane):
+                return
+            lane = current_lane if lane is None else lane
             # ``capture.read()`` returns a new ndarray for the next frame, so
             # copying here only doubles the 1080p allocation. The pending map
             # owns the reference until the inference loop consumes/replaces it.
-            self.pending[host] = (frame, frame_index)
+            # Keep the lane identity with the frame. A late frame from an old
+            # decoder must not be processed by a newly restarted lane.
+            self.pending[host] = (frame, frame_index, lane)
 
     def materialise(self, candidate: dict[str, Any], record_id: int, stem: str, archive_camera_id: str) -> dict[str, Any] | None:
         write_image = self.service._write_image
@@ -835,7 +917,7 @@ class GpuHub:
             "error": self.error,
             "paused": bool(self.busy()),
             "hub_alive": self.thread.is_alive(),
-            "active_cameras": sum(1 for lane in self.lanes.values() if lane.opened),
+            "active_cameras": sum(1 for lane in self.lanes.values() if lane.opened or lane.starting),
             "ocr": self.service.ocr_engine_status(),
         }
         payload.update(plan.as_dict())
@@ -843,7 +925,7 @@ class GpuHub:
         payload["cpu_hub"] = bool(self.cpu_service is not None and self.cpu_service._scanner is not None)
         return payload
 
-    def _next_batch(self, role: str = "primary") -> list[tuple[str, tuple[Any, int]]]:
+    def _next_batch(self, role: str = "primary") -> list[tuple[str, tuple[Any, int, Any]]]:
         """Pick pending frames, hot lanes first, idle lanes throttled.
 
         The hub is the throughput limit (about one frame per second per
@@ -857,10 +939,18 @@ class GpuHub:
         now = time.monotonic()
         hybrid = role in ("gpu", "cpu") or self._using_hybrid()
         with self.pending_lock:
-            hot: list[tuple[str, tuple[Any, int]]] = []
-            idle: list[tuple[str, tuple[Any, int]]] = []
-            for host, item in self.pending.items():
+            hot: list[tuple[str, tuple[Any, int, Any]]] = []
+            idle: list[tuple[str, tuple[Any, int, Any]]] = []
+            for host, item in list(self.pending.items()):
                 lane = self.lanes.get(host)
+                submitted_lane = item[2] if len(item) > 2 else None
+                if lane is None or (submitted_lane is not None and lane is not submitted_lane):
+                    self.pending.pop(host, None)
+                    continue
+                lane_stop = getattr(lane, "stop", None)
+                if lane_stop is not None and lane_stop.is_set():
+                    self.pending.pop(host, None)
+                    continue
                 if lane is not None and lane.hot:
                     hot.append((host, item))
                 else:
@@ -916,14 +1006,21 @@ class GpuHub:
 
     def _infer_batch(
         self,
-        batch: list[tuple[str, tuple[Any, int]]],
+        batch: list[tuple[str, tuple[Any, int, Any]]],
         service: ScanService,
         lock: threading.Lock,
         label: str,
     ) -> None:
-        for host, (frame, frame_index) in batch:
+        for host, item in batch:
+            frame, frame_index = item[:2]
+            submitted_lane = item[2] if len(item) > 2 else None
             lane = self.lanes.get(host)
-            if lane is None or lane.stop.is_set() or service._scanner is None:
+            if (
+                lane is None
+                or (submitted_lane is not None and lane is not submitted_lane)
+                or lane.stop.is_set()
+                or service._scanner is None
+            ):
                 continue
             try:
                 with lock:
@@ -1035,9 +1132,59 @@ class WorkerPool:
         self.guard = threading.Lock()
         self.default_roi: dict[str, Any] | None = None
         self.roi_by_host: dict[str, dict[str, Any] | None] = {}
+        self._roi_repository: DatabaseRepository | None = None
+        self._roi_database_url = ""
+        self._roi_lock = threading.Lock()
+        self._load_persisted_rois()
+
+    def _load_persisted_rois(self) -> None:
+        """Load per-camera ROI once so a worker restart keeps the scan boxes."""
+
+        database_url = str(self.settings.database_url or "").strip()
+        if not database_url or database_url == self._roi_database_url:
+            return
+        try:
+            repository = DatabaseRepository(database_url)
+            # Keep the existing database and add only the camera ROI field.
+            repository.ensure_camera_storage()
+            saved = repository.list_camera_rois()
+            with self.guard:
+                self.roi_by_host.update(saved)
+            self._roi_repository = repository
+            self._roi_database_url = database_url
+            LOGGER.info("Loaded saved ROI for %d camera(s)", len(saved))
+        except Exception:
+            # A database outage must not prevent the CCTV worker from starting;
+            # the current session can still use an ROI supplied by the browser.
+            LOGGER.exception("Unable to load saved camera ROI")
+
+    def _persist_camera_roi(self, host: str, roi: dict[str, Any] | None, url: str = "") -> bool:
+        database_url = str(self.settings.database_url or "").strip()
+        if not database_url:
+            return False
+        try:
+            with self._roi_lock:
+                if self._roi_repository is None or self._roi_database_url != database_url:
+                    self._roi_repository = DatabaseRepository(database_url)
+                    self._roi_repository.ensure_camera_storage()
+                    self._roi_database_url = database_url
+                self._roi_repository.set_camera_roi(host, roi, stream_url=url)
+            return True
+        except Exception:
+            LOGGER.exception("Unable to persist ROI for camera %s", host)
+            return False
 
     def _publish_update(self, reason: str) -> None:
         publish_worker_event(self.snapshot(), message=reason)
+
+    def persist_rois(self) -> None:
+        """Flush the in-memory ROI map before an orderly server shutdown."""
+
+        with self.guard:
+            lanes = {host: lane.url for host, lane in self.hub.lanes.items()}
+            saved = list(self.roi_by_host.items())
+        for host, roi in saved:
+            self._persist_camera_roi(host, roi, lanes.get(host, ""))
 
     def configure(self, settings: Settings) -> None:
         self.settings = settings
@@ -1045,6 +1192,7 @@ class WorkerPool:
         self.hub.service.settings = settings
         for lane in self.hub.lanes.values():
             lane.settings = settings
+        self._load_persisted_rois()
 
     def set_compute(self, mode: str) -> dict[str, Any]:
         from dataclasses import replace
@@ -1081,18 +1229,21 @@ class WorkerPool:
             url = local_camera_url(local[1])
         else:
             host = (urlsplit(url).hostname or host).strip()
-        chosen_roi = roi if roi is not None else self.roi_by_host.get(host, self.default_roi)
+        previous_roi = self.roi_by_host.get(host)
+        chosen_roi = roi if roi is not None else previous_roi or self.default_roi
         if chosen_roi is not None:
             self.roi_by_host[host] = chosen_roi
+            if roi is not None and chosen_roi != previous_roi:
+                self._persist_camera_roi(host, chosen_roi, url)
         with self.guard:
             existing = self.hub.lanes.get(host)
-            if existing and existing.opened:
+            if existing and (existing.opened or existing.starting):
                 existing.scanning = scan
                 if chosen_roi is not None:
                     existing.roi = chosen_roi
                 return existing.snapshot()
             if existing:
-                existing.stop_lane()
+                existing.stop_lane(timeout=0.0)
                 self.hub.lanes.pop(host, None)
             lane_index = int(index or 0) or max((item.index for item in self.hub.lanes.values()), default=0) + 1
             lane = CameraLane(
@@ -1116,7 +1267,7 @@ class WorkerPool:
                 self.hub.lanes.pop(host, None)
             lane.stop_lane()
             raise
-        self._publish_update("camera started")
+        self._publish_update("camera starting")
         return lane.snapshot()
 
     def start_all(
@@ -1131,9 +1282,6 @@ class WorkerPool:
         rois: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         errors: list[dict[str, str]] = []
-        if rois:
-            for key, value in rois.items():
-                self.roi_by_host[str(key)] = value
         if roi is not None:
             self.default_roi = roi
 
@@ -1159,7 +1307,7 @@ class WorkerPool:
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(timeout=20.0)
+            thread.join(timeout=5.0)
         snapshot = self.snapshot()
         snapshot["errors"] = errors
         self._publish_update("cameras started")
@@ -1171,16 +1319,26 @@ class WorkerPool:
         if lane is None:
             self._publish_update("camera stopped")
             return {"host": host, "live": False}
-        lane.stop_lane()
+        lane.stop_lane(timeout=0.0)
         self._publish_update("camera stopped")
         return {"host": host, "live": False}
 
-    def stop_all(self) -> None:
+    def stop_all(self, *, wait: bool = False) -> None:
         with self.guard:
             lanes = list(self.hub.lanes.values())
             self.hub.lanes.clear()
         for lane in lanes:
-            lane.stop_lane()
+            # Signal every decoder first so a slow RTSP read cannot delay the
+            # next camera from receiving its stop request.
+            lane.stop_lane(timeout=0.0)
+        if wait:
+            deadline = time.monotonic() + SHUTDOWN_JOIN_TIMEOUT_SECONDS
+            for lane in lanes:
+                thread = lane.capture_thread
+                if thread is None or not thread.is_alive() or thread is threading.current_thread():
+                    continue
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            self.hub.shutdown()
         self._publish_update("cameras stopped")
 
     def get(self, host: str) -> CameraLane | None:
@@ -1196,11 +1354,15 @@ class WorkerPool:
         if host:
             self.roi_by_host[host] = roi
             lane = self.get(host)
+            stream_url = lane.url if lane is not None else ""
+            persisted = self._persist_camera_roi(host, roi, stream_url)
             if lane is None:
-                return {"host": host, "live": False, "roi": roi}
+                return {"host": host, "live": False, "roi": roi, "roi_persisted": persisted}
             lane.roi = roi
             self._publish_update("camera ROI changed")
-            return lane.snapshot()
+            snapshot = lane.snapshot()
+            snapshot["roi_persisted"] = persisted
+            return snapshot
         self.default_roi = roi
         self._publish_update("camera ROI changed")
         return self.snapshot()

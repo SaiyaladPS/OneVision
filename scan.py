@@ -1320,6 +1320,50 @@ def apply_country_layout_priority(
     lao_prefix_conf = float(lao.get("prefix_confidence") or 0.0)
     thai_province_conf = float(thai.get("province_confidence") or 0.0)
     lao_province_conf = float(lao.get("province_confidence") or 0.0)
+    thai_score = float(thai.get("score", 0.0))
+    lao_score = float(lao.get("score", 0.0))
+    # Lao and Thai share several visually similar glyphs (for example ບ/บ).
+    # A Thai character model can therefore be very confident about a
+    # lookalike even when the Lao model has read both the Lao prefix and a
+    # real Lao province from the same crop.  Treat that two-part Lao evidence
+    # as provenance, rather than letting a small prefix-confidence difference
+    # route the crop through the Thai pipeline.  A similarly strong, known
+    # Thai province remains authoritative for genuine Thai registrations.
+    strong_lao_provenance = (
+        lao_identity
+        and lao_cues["lao_letters"]
+        and lao_cues["lao_province"]
+        and lao_prefix_conf >= 0.62
+        and lao_province_conf >= 0.55
+        and lao_score >= thai_score - 0.08
+    )
+    strong_thai_provenance = (
+        thai_identity
+        and thai_province
+        and (
+            # A numbered Thai series plus a known Thai province has a very
+            # distinctive layout; do not let an unrelated Lao lookalike
+            # displace it merely because its province score is close.
+            (numbered_series and thai_province_conf >= 0.72)
+            or (
+                thai_province_conf >= 0.55
+                and thai_province_conf >= lao_province_conf + 0.12
+                and thai_prefix_conf >= lao_prefix_conf - 0.05
+            )
+        )
+    )
+    if thai_identity and strong_lao_provenance and not strong_thai_provenance:
+        margin = lao_score - thai_score
+        result.update(
+            {
+                "country": "lao",
+                "raw_country": "lao",
+                "margin": round(margin, 4),
+                "confidence": round(max(0.0, min(1.0, 0.50 + max(margin, 0.12) * 0.50)), 4),
+                "selection_reason": "lao_script_priority",
+            }
+        )
+        return result
     if (
         thai_identity
         and lao_identity
@@ -1335,7 +1379,7 @@ def apply_country_layout_priority(
             and thai_prefix_conf >= lao_prefix_conf + 0.05
         )
     ):
-        margin = float(lao.get("score", 0.0)) - float(thai.get("score", 0.0))
+        margin = lao_score - thai_score
         result.update(
             {
                 "country": "lao",
@@ -1353,7 +1397,7 @@ def apply_country_layout_priority(
         or thai_truck
         or not lao_identity
     ):
-        margin = float(thai.get("score", 0.0)) - float(lao.get("score", 0.0))
+        margin = thai_score - lao_score
         result.update(
             {
                 "country": "thai",
@@ -1365,8 +1409,6 @@ def apply_country_layout_priority(
         )
         return result
     if lao_identity and not thai_identity:
-        lao_score = float(lao.get("score", 0.0))
-        thai_score = float(thai.get("score", 0.0))
         margin = lao_score - thai_score
         result.update(
             {
@@ -1379,7 +1421,7 @@ def apply_country_layout_priority(
         )
         return result
     if thai_province and not lao_identity and not lao_cues["lao_province"]:
-        margin = float(thai.get("score", 0.0)) - float(lao.get("score", 0.0))
+        margin = thai_score - lao_score
         result.update(
             {
                 "country": "thai",
@@ -1391,7 +1433,7 @@ def apply_country_layout_priority(
         )
         return result
     if lao_cues["lao_province"] and not thai_identity and not thai_province:
-        margin = float(lao.get("score", 0.0)) - float(thai.get("score", 0.0))
+        margin = lao_score - thai_score
         result.update(
             {
                 "country": "lao",

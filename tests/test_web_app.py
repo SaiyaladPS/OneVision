@@ -50,6 +50,45 @@ class WebAppTests(unittest.TestCase):
         response = self.client.post("/api/auth/login", json={"username": username, "password": password})
         self.assertEqual(response.status_code, 200, response.text)
 
+    def test_new_login_revokes_the_previous_session(self) -> None:
+        self._login()
+        other = TestClient(create_app())
+        response = other.post("/api/auth/login", json={"username": "admin", "password": "secret1"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.client.get("/api/auth/me").status_code, 401)
+        self.assertEqual(other.get("/api/auth/me").status_code, 200)
+
+    def test_roi_update_is_broadcast_over_websocket(self) -> None:
+        self._login()
+        created = self.client.post(
+            "/api/users",
+            json={
+                "username": "roioperator",
+                "display_name": "ROI Operator",
+                "role": "operator",
+                "password": "secret1",
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        other = TestClient(create_app())
+        login = other.post("/api/auth/login", json={"username": "roioperator", "password": "secret1"})
+        self.assertEqual(login.status_code, 200, login.text)
+        with self.client.websocket_connect("/ws") as sender, other.websocket_connect("/ws") as receiver:
+            sender.receive_json()
+            receiver.receive_json()
+            update = self.client.post(
+                "/api/worker/roi",
+                json={
+                    "host": "192.168.100.50",
+                    "roi": {"enabled": True, "shape": "rectangle", "x": 0.2, "y": 0.3, "width": 0.4, "height": 0.5},
+                },
+            )
+            self.assertEqual(update.status_code, 200, update.text)
+            payload = receiver.receive_json()
+        self.assertEqual(payload["type"], "ROI_UPDATED")
+        self.assertEqual(payload["data"]["host"], "192.168.100.50")
+        self.assertEqual(payload["data"]["roi"]["x"], 0.2)
+
     def test_home_page_redirects_when_anonymous(self) -> None:
         response = self.client.get("/", follow_redirects=False)
         self.assertEqual(response.status_code, 302)
@@ -91,8 +130,8 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("gpuChip", response.text)
         self.assertIn("computeMode", response.text)
         self.assertIn("roiPanel", response.text)
-        self.assertIn("app.js?v=ops39", response.text)
-        self.assertIn("app.css?v=ops21", response.text)
+        self.assertIn("app.js?v=ops41", response.text)
+        self.assertIn("app.css?v=ops24", response.text)
         self.assertIn("OneVision", response.text)
         self.assertIn("Noto+Sans+Thai", response.text)
         self.assertIn("camerasBtn", response.text)

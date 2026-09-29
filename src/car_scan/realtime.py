@@ -8,7 +8,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -20,6 +20,10 @@ class _Subscriber:
     websocket: WebSocket
     loop: asyncio.AbstractEventLoop
     queue: asyncio.Queue[dict[str, Any]]
+    user_id: int
+    session_id: str
+    worker_snapshot_filter: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    camera_event_filter: Callable[[str], bool] | None = None
 
 
 class OneVisionEventHub:
@@ -34,12 +38,24 @@ class OneVisionEventHub:
         self._lock = threading.Lock()
         self._subscribers: dict[str, _Subscriber] = {}
 
-    async def connect(self, websocket: WebSocket) -> _Subscriber:
+    async def connect(
+        self,
+        websocket: WebSocket,
+        *,
+        user_id: int,
+        session_id: str,
+        worker_snapshot_filter: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        camera_event_filter: Callable[[str], bool] | None = None,
+    ) -> _Subscriber:
         await websocket.accept()
         subscriber = _Subscriber(
             websocket=websocket,
             loop=asyncio.get_running_loop(),
             queue=asyncio.Queue(maxsize=100),
+            user_id=int(user_id),
+            session_id=str(session_id),
+            worker_snapshot_filter=worker_snapshot_filter,
+            camera_event_filter=camera_event_filter,
         )
         with self._lock:
             self._subscribers[uuid.uuid4().hex] = subscriber
@@ -76,6 +92,30 @@ class OneVisionEventHub:
         for subscriber in subscribers:
             try:
                 subscriber.loop.call_soon_threadsafe(self._enqueue, subscriber.queue, payload)
+            except RuntimeError:
+                self.disconnect(subscriber)
+
+    @staticmethod
+    async def _close_websocket(websocket: WebSocket, code: int) -> None:
+        try:
+            await websocket.close(code=code)
+        except Exception:
+            pass
+
+    def close_user_sessions(self, user_id: int, *, keep_session_id: str | None = None) -> None:
+        """Close WebSockets that no longer own the user's active session."""
+
+        with self._lock:
+            subscribers = [
+                item
+                for item in self._subscribers.values()
+                if item.user_id == int(user_id) and (keep_session_id is None or item.session_id != keep_session_id)
+            ]
+        for subscriber in subscribers:
+            try:
+                subscriber.loop.call_soon_threadsafe(
+                    lambda item=subscriber: asyncio.create_task(self._close_websocket(item.websocket, 4001))
+                )
             except RuntimeError:
                 self.disconnect(subscriber)
 
@@ -138,8 +178,44 @@ def publish_worker_event(snapshot: dict[str, Any], *, message: str = "Worker upd
     )
 
 
-async def serve_websocket(websocket: WebSocket) -> None:
-    subscriber = await event_hub.connect(websocket)
+def publish_roi_event(host: str, roi: dict[str, Any] | None, *, user: dict[str, Any]) -> None:
+    """Broadcast an ROI edit so every authenticated display stays aligned."""
+
+    event_hub.publish(
+        {
+            "id": f"roi-{host or 'default'}-{uuid.uuid4().hex[:8]}",
+            "type": "ROI_UPDATED",
+            "source": "OneVision",
+            "message": "Camera ROI updated",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "severity": "info",
+            "data": {
+                "host": str(host or ""),
+                "roi": roi,
+                "user": {
+                    "id": int(user.get("id") or 0),
+                    "display_name": str(user.get("display_name") or user.get("username") or ""),
+                },
+            },
+        }
+    )
+
+
+async def serve_websocket(
+    websocket: WebSocket,
+    *,
+    user_id: int,
+    session_id: str,
+    worker_snapshot_filter: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    camera_event_filter: Callable[[str], bool] | None = None,
+) -> None:
+    subscriber = await event_hub.connect(
+        websocket,
+        user_id=user_id,
+        session_id=session_id,
+        worker_snapshot_filter=worker_snapshot_filter,
+        camera_event_filter=camera_event_filter,
+    )
     sender = asyncio.create_task(_send_events(subscriber))
     try:
         while True:
@@ -155,7 +231,27 @@ async def serve_websocket(websocket: WebSocket) -> None:
 async def _send_events(subscriber: _Subscriber) -> None:
     try:
         while True:
-            await subscriber.websocket.send_json(await subscriber.queue.get())
+            event = await subscriber.queue.get()
+            if event.get("type") == "ROI_UPDATED" and subscriber.camera_event_filter:
+                host = str((event.get("data") or {}).get("host") or "")
+                try:
+                    if not subscriber.camera_event_filter(host):
+                        continue
+                except Exception:
+                    LOGGER.exception("Unable to filter camera event for websocket user")
+                    continue
+            if event.get("type") == "WORKER_UPDATED" and subscriber.worker_snapshot_filter:
+                try:
+                    event = dict(event)
+                    data = dict(event.get("data") or {})
+                    snapshot = data.get("snapshot")
+                    if isinstance(snapshot, dict):
+                        data["snapshot"] = subscriber.worker_snapshot_filter(snapshot)
+                    event["data"] = data
+                except Exception:
+                    LOGGER.exception("Unable to filter worker event for websocket user")
+                    continue
+            await subscriber.websocket.send_json(event)
     except (asyncio.CancelledError, WebSocketDisconnect):
         return
     except Exception:

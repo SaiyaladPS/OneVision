@@ -83,9 +83,13 @@ const STRINGS = {
     gpu_hybrid: "GPU {name} + CPU",
     gpu_loading: "กำลังโหลดโมเดล",
     camera_idle: "ยังไม่เปิด",
+    camera_starting: "กำลังเปิดกล้อง",
+    camera_stopping: "กำลังปิดกล้อง",
     camera_enable: "ใช้กล้องนี้",
     camera_disable: "ปิดกล้องนี้",
     camera_selected: "กำลังใช้งาน",
+    camera_view_only: "ดูภาพเท่านั้น",
+    camera_scan_allowed: "สแกนได้",
     camera_scanning: "ตรวจป้าย",
     camera_scanning_load: "กำลังโหลดโมเดลตรวจป้าย",
     camera_scanning_found: "พบป้ายในเฟรม {n}",
@@ -155,6 +159,7 @@ const STRINGS = {
     role_admin: "ผู้ดูแลระบบ",
     role_operator: "พนักงานสแกน",
     role_viewer: "ผู้ดูผล",
+    role_superuser: "Super User (สิทธิ์ทั้งหมด)",
     status_active: "ใช้งาน",
     status_disabled: "ปิดไว้",
     placeholder_user: "ชื่อผู้ใช้",
@@ -317,9 +322,13 @@ const STRINGS = {
     gpu_hybrid: "GPU {name} + CPU",
     gpu_loading: "ກຳລັງໂຫຼດໂມເດວ",
     camera_idle: "ຍັງບໍ່ເປີດ",
+    camera_starting: "ກຳລັງເປີດກ້ອງ",
+    camera_stopping: "ກຳລັງປິດກ້ອງ",
     camera_enable: "ໃຊ້ກ້ອງນີ້",
     camera_disable: "ປິດກ້ອງນີ້",
     camera_selected: "ກຳລັງໃຊ້ງານ",
+    camera_view_only: "ເບິ່ງພາບເທົ່ານັ້ນ",
+    camera_scan_allowed: "ສະແກນໄດ້",
     camera_scanning: "ກວດປ້າຍ",
     camera_scanning_load: "ກຳລັງໂຫຼດໂມເດວກວດປ້າຍ",
     camera_scanning_found: "ພົບປ້າຍໃນເຟຣມ {n}",
@@ -389,6 +398,7 @@ const STRINGS = {
     role_admin: "ຜູ້ດູແລລະບົບ",
     role_operator: "ພະນັກງານສະແກນ",
     role_viewer: "ຜູ້ເບິ່ງຜົນ",
+    role_superuser: "Super User (ສິດທັງໝົດ)",
     status_active: "ໃຊ້ງານ",
     status_disabled: "ປິດໄວ້",
     placeholder_user: "ຊື່ຜູ້ໃຊ້",
@@ -551,9 +561,13 @@ const STRINGS = {
     gpu_hybrid: "GPU {name} + CPU",
     gpu_loading: "Loading models",
     camera_idle: "Idle",
+    camera_starting: "Opening camera",
+    camera_stopping: "Closing camera",
     camera_enable: "Use this camera",
     camera_disable: "Turn off camera",
     camera_selected: "Active",
+    camera_view_only: "View only",
+    camera_scan_allowed: "Scanning allowed",
     camera_scanning: "Reading plates",
     camera_scanning_load: "Loading plate models",
     camera_scanning_found: "Saw {n} plate(s) this frame",
@@ -623,6 +637,7 @@ const STRINGS = {
     role_admin: "Administrator",
     role_operator: "Scanner",
     role_viewer: "Viewer",
+    role_superuser: "Super User (all permissions)",
     status_active: "Active",
     status_disabled: "Disabled",
     placeholder_user: "Username",
@@ -723,11 +738,14 @@ const state = {
   chunks: [],
   user: null,
   users: [],
+  roleCatalog: [],
+  statusCatalog: [],
   editingUserId: null,
   report: null,
   ipCameraConfigured: false,
   ipCameras: [],
   cameraStorage: "file",
+  cameraAccessAvailable: false,
   liveOpen: false,
   liveOpening: false,
   liveRecording: false,
@@ -740,6 +758,7 @@ const state = {
   worker: null,
   workerBlobs: {},
   selectedHost: "",
+  cameraTransitions: {},
   cameraPage: 0,
   wallLayoutFrame: 0,
 };
@@ -792,6 +811,16 @@ function roleLabel(role) {
   return t(`role_${role}`) || role;
 }
 
+function renderRoleCatalog() {
+  const select = $("newRole");
+  if (!select || !state.roleCatalog.length) return;
+  const selected = select.value;
+  select.innerHTML = state.roleCatalog
+    .map((role) => `<option value="${escapeHtml(role.code)}">${escapeHtml(roleLabel(role.code))}</option>`)
+    .join("");
+  if (state.roleCatalog.some((role) => role.code === selected)) select.value = selected;
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -803,7 +832,9 @@ function escapeHtml(value) {
 function applyPermissions() {
   const scanOf = { image: "scan.image", video: "scan.video", camera: "scan.camera" };
   document.querySelectorAll(".mode[data-mode]").forEach((button) => {
-    const allowed = can(scanOf[button.dataset.mode]);
+    const allowed = button.dataset.mode === "camera"
+      ? can("scan.camera") || state.cameraAccessAvailable
+      : can(scanOf[button.dataset.mode]);
     button.disabled = !allowed;
     button.classList.toggle("hidden", !allowed && !can("users.manage"));
   });
@@ -964,9 +995,14 @@ function retranslate() {
   $("newUsername").placeholder = t("placeholder_user");
   $("newDisplayName").placeholder = t("placeholder_name");
   $("newPassword").placeholder = state.editingUserId ? t("placeholder_password_edit") : t("placeholder_password");
-  $("newRole").options[0].text = t("role_operator");
-  $("newRole").options[1].text = t("role_viewer");
-  $("newRole").options[2].text = t("role_admin");
+  if (state.roleCatalog.length) {
+    renderRoleCatalog();
+  } else {
+    const labels = { operator: "role_operator", viewer: "role_viewer", admin: "role_admin", superuser: "role_superuser" };
+    Array.from($("newRole").options).forEach((option) => {
+      if (labels[option.value]) option.text = t(labels[option.value]);
+    });
+  }
   applyPermissions();
   if (state.users.length) renderUsers();
   if (state.report) renderReport(state.report);
@@ -979,7 +1015,8 @@ function retranslate() {
 
 function setMode(mode) {
   const needed = { image: "scan.image", video: "scan.video", camera: "scan.camera" }[mode];
-  if (needed && state.user && !can(needed)) {
+  const cameraViewAllowed = mode === "camera" && state.cameraAccessAvailable;
+  if (needed && state.user && !can(needed) && !cameraViewAllowed) {
     setStatus(t("no_permission"));
     return;
   }
@@ -1005,8 +1042,6 @@ function setMode(mode) {
     renderCameraSelector();
     renderCameraGrid();
     syncRoiToolbar();
-  } else {
-    if (!state.liveOpen && !state.liveOpening) stopWorkerEvents(false);
   }
   retranslate();
   if (!state.jobId) {
@@ -1141,7 +1176,7 @@ function cameraLabelFor(host) {
 function ensureCameraRois() {
   (state.ipCameras || []).forEach((camera) => {
     if (camera.host && !state.cameraRois[camera.host]) {
-      state.cameraRois[camera.host] = copyRoi(state.roi);
+      state.cameraRois[camera.host] = copyRoi(camera.roi || state.roi);
     }
   });
 }
@@ -1218,6 +1253,19 @@ function schedulePushRoi(host, immediate) {
   };
   if (immediate) run();
   else state.roiPushTimers[key] = window.setTimeout(run, 160);
+}
+
+function flushRoiSaves() {
+  Object.entries(state.cameraRois || {}).forEach(([host, roi]) => {
+    window.clearTimeout(state.roiPushTimers[host]);
+    fetch("/api/worker/roi", {
+      method: "POST",
+      credentials: "same-origin",
+      keepalive: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host, roi: copyRoi(roi) }),
+    }).catch(() => {});
+  });
 }
 
 function cameraFrameBox(canvas, img) {
@@ -1712,13 +1760,32 @@ function renderCameraSelect() {
 }
 
 function selectedCameraHosts() {
+  const allowed = new Set((state.ipCameras || [])
+    .filter((camera) => camera.can_scan !== false)
+    .map((camera) => camera.host));
   return [...document.querySelectorAll("#cameraSelectorList input[data-camera-toggle]:checked")]
     .map((input) => input.dataset.host)
-    .filter(Boolean);
+    .filter((host) => host && allowed.has(host));
 }
 
-function cameraLiveLabel(live) {
+function cameraTransition(host) {
+  return state.cameraTransitions[host] || "";
+}
+
+function setCameraTransition(host, phase) {
+  if (!host) return;
+  if (phase) state.cameraTransitions[host] = phase;
+  else delete state.cameraTransitions[host];
+  renderCameraSelector();
+  renderCameraGrid();
+}
+
+function cameraLiveLabel(live, host = "") {
+  const transition = cameraTransition(host);
+  if (transition === "opening") return t("camera_starting");
+  if (transition === "stopping") return t("camera_stopping");
   if (live?.error) return live.error;
+  if (live?.starting) return t("camera_starting");
   if (live?.scanning) return t("camera_scanning");
   if (live?.live) return t("camera_live");
   return t("camera_idle");
@@ -1728,7 +1795,7 @@ function renderCameraSelector() {
   const list = $("cameraSelectorList");
   if (!list) return;
   const cameras = state.ipCameras || [];
-  const active = new Set(liveCameras().filter((camera) => camera.live).map((camera) => camera.host));
+  const active = new Set(liveCameras().filter((camera) => camera.live || camera.starting).map((camera) => camera.host));
   const selectedCount = cameras.filter((camera) => active.has(camera.host)).length;
 
   if ($("cameraSelectorMeta")) {
@@ -1741,16 +1808,22 @@ function renderCameraSelector() {
     ? cameras.map((camera, index) => {
       const live = liveCamera(camera.host);
       const label = listedCameraLabel(camera) || `Camera ${String(index + 1).padStart(2, "0")}`;
-      const checked = Boolean(live?.live);
+      const transition = cameraTransition(camera.host);
+      const checked = Boolean(live?.live || live?.starting || transition === "opening");
+      const busy = Boolean(transition);
+      const accessLabel = camera.can_scan === false ? t("camera_view_only") : t("camera_scan_allowed");
       return `
-        <label class="camera-selector-item${checked ? " is-active" : ""}">
-          <input type="checkbox" data-camera-toggle data-host="${escapeHtml(camera.host)}" ${checked ? "checked" : ""} />
+        <label class="camera-selector-item${checked ? " is-active" : ""}${busy ? " is-busy" : ""}" ${busy ? 'aria-busy="true"' : ""}>
+          <input type="checkbox" data-camera-toggle data-host="${escapeHtml(camera.host)}" ${checked ? "checked" : ""} ${busy ? "disabled" : ""} />
           <span class="camera-selector-check" aria-hidden="true"></span>
           <span class="camera-selector-copy">
             <strong>${escapeHtml(label)}</strong>
             <small>${escapeHtml(camera.host)}</small>
           </span>
-          <span class="camera-selector-status">${escapeHtml(cameraLiveLabel(live))}</span>
+          <span class="camera-selector-status">
+            <span class="camera-access-badge">${escapeHtml(accessLabel)}</span>
+            ${escapeHtml(cameraLiveLabel(live, camera.host))}
+          </span>
         </label>`;
     }).join("")
     : `<p class="camera-selector-empty">${escapeHtml(t("ip_camera_add_placeholder"))}</p>`;
@@ -1836,7 +1909,7 @@ async function setComputeMode(mode) {
 function applyWorker(data) {
   state.worker = data || { cameras: [], gpu: {}, plates: [] };
   const cameras = liveCameras();
-  state.liveOpen = cameras.some((item) => item.live);
+  state.liveOpen = cameras.some((item) => item.live || item.starting);
   state.liveRecording = cameras.some((item) => item.recording);
   if (Array.isArray(data.plates) && data.plates.length) {
     const previousKey = livePlateKey(state.plates[state.selected]);
@@ -1862,9 +1935,10 @@ function applyWorker(data) {
   if ($("computeMode") && gpu.requested && $("computeMode").value !== gpu.requested && !$("computeMode").disabled) {
     $("computeMode").value = gpu.requested;
   }
-  const liveCount = cameras.filter((item) => item.live).length;
+  const liveCount = cameras.filter((item) => item.live || item.starting).length;
   $("cameraLiveStatus").textContent = liveCount ? `${t("worker_head")} · ${liveCount}` : "";
-  $("camStart").textContent = liveCamera(selectedCameraHost())?.live ? t("cam_close") : t("cam_start");
+  const selectedCamera = liveCamera(selectedCameraHost());
+  $("camStart").textContent = selectedCamera?.live || selectedCamera?.starting ? t("cam_close") : t("cam_start");
   const selected = liveCamera(selectedCameraHost());
   $("camSnap").disabled = !selected?.live;
   $("camRecord").disabled = !selected?.live || Boolean(selected?.recording);
@@ -1934,7 +2008,7 @@ function bindVisibleCameraStreams() {
 }
 
 function activeCameraList() {
-  const activeHosts = new Set(liveCameras().filter((camera) => camera.live).map((camera) => camera.host));
+  const activeHosts = new Set(liveCameras().filter((camera) => camera.live || camera.starting).map((camera) => camera.host));
   return (state.ipCameras || []).filter((camera) => activeHosts.has(camera.host));
 }
 
@@ -2038,6 +2112,8 @@ function renderCameraGrid() {
     tile.querySelector(".camera-tile-host").textContent = host;
     tile.querySelector("[data-role=status]").textContent = live?.error
       ? live.error
+      : live?.starting
+        ? t("camera_starting")
       : live?.scanning
         ? Number(live.sampled_frames) > 0
           ? live.last_detect_count
@@ -2051,6 +2127,7 @@ function renderCameraGrid() {
     tile.querySelector("[data-action=snap]").textContent = t("cam_snap");
     tile.querySelector("[data-action=snap]").disabled = !live?.live;
     tile.classList.toggle("is-live", Boolean(live?.live));
+    tile.classList.toggle("is-starting", Boolean(live?.starting));
     tile.classList.toggle("is-error", Boolean(live?.error));
     tile.classList.toggle("is-selected", host === selected);
     const img = tile.querySelector("img");
@@ -2082,18 +2159,39 @@ function startWorkerEvents() {
   socket.onmessage = (event) => {
     try {
       const payload = JSON.parse(event.data);
-      if (payload.type !== "WORKER_UPDATED") return;
-      const snapshot = payload.data?.snapshot;
-      if (snapshot) applyWorker(snapshot);
+      if (payload.type === "ROI_UPDATED") {
+        const host = String(payload.data?.host || "");
+        const roi = payload.data?.roi;
+        if (!roi) return;
+        if (host) {
+          state.cameraRois[host] = copyRoi(roi);
+          if (host === selectedCameraHost()) state.roi = copyRoi(roi);
+          drawCameraRoi(host);
+        } else {
+          state.roi = copyRoi(roi);
+        }
+        syncRoiToolbar();
+        return;
+      }
+      if (payload.type === "WORKER_UPDATED") {
+        const snapshot = payload.data?.snapshot;
+        if (snapshot) applyWorker(snapshot);
+      }
     } catch {
       // Ignore malformed or non-worker events and keep the stream alive.
     }
   };
   socket.onerror = () => socket.close();
-  socket.onclose = () => {
+  socket.onclose = (event) => {
     if (state.workerSocket !== socket) return;
     state.workerSocket = null;
     if (!state.workerEventsWanted || state.workerEventsSuspended) return;
+    if (event.code === 4001 || event.code === 1008) {
+      fetch("/api/auth/me", { credentials: "same-origin" }).then((response) => {
+        if (!response.ok) window.location.replace("/login");
+      }).catch(() => {});
+      return;
+    }
     const delay = Math.min(10000, 1000 * (2 ** Math.min(state.workerSocketRetry, 3)));
     state.workerSocketRetry += 1;
     state.workerSocketTimer = window.setTimeout(() => {
@@ -2146,6 +2244,29 @@ async function refreshWorker() {
 }
 
 async function startCameraHosts(hosts) {
+  if (hosts.length > 1) {
+    const rois = {};
+    hosts.forEach((host) => { rois[host] = roiFor(host); });
+    const response = await api("/api/worker/start-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hosts, rois }),
+    });
+    const text = await response.text();
+    let data = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { detail: text || `HTTP ${response.status}` };
+    }
+    await refreshWorker();
+    const errors = new Map((data.errors || []).map((item) => [item.host, item.error || data.detail]));
+    return hosts.map((host) => ({
+      host,
+      ok: response.ok && !errors.has(host),
+      data: errors.has(host) ? { detail: errors.get(host) } : data,
+    }));
+  }
   const results = await Promise.all(hosts.map(async (host) => {
     const response = await api("/api/worker/start", {
       method: "POST",
@@ -2210,19 +2331,15 @@ async function stopScan() {
 }
 
 async function toggleCamera(host) {
-  if (!can("scan.camera")) {
+  const camera = (state.ipCameras || []).find((item) => item.host === host);
+  if (!camera || camera.can_view === false) {
     setStatus(t("no_permission"));
     return;
   }
+  if (cameraTransition(host)) return;
   const live = liveCamera(host);
-  if (live?.live) {
-    await api("/api/worker/stop", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ host }),
-    });
-    await refreshWorker();
-    setStatus(t("ready"));
+  if (live?.live || live?.starting) {
+    await stopCamera(host);
     return;
   }
   await openCamera(host);
@@ -2230,20 +2347,13 @@ async function toggleCamera(host) {
 
 async function setCameraSelection(host, enabled) {
   selectCameraHost(host);
+  if (cameraTransition(host)) return;
   if (enabled) {
     await openCamera(host);
-    renderCameraSelector();
     return;
   }
-  if (liveCamera(host)?.live) {
-    await api("/api/worker/stop", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ host }),
-    });
-    await refreshWorker();
-    setStatus(t("ready"));
-    renderCameraSelector();
+  if (liveCamera(host)?.live || liveCamera(host)?.starting) {
+    await stopCamera(host);
     return;
   }
   renderCameraSelector();
@@ -2251,19 +2361,64 @@ async function setCameraSelection(host, enabled) {
 }
 
 async function setAllCameraSelections(enabled) {
-  const hosts = (state.ipCameras || []).map((camera) => camera.host).filter(Boolean);
-  if (!hosts.length) return;
+  const cameras = (state.ipCameras || []).filter((camera) => camera.host);
+  const scanHosts = cameras.filter((camera) => camera.can_scan !== false).map((camera) => camera.host);
+  const viewHosts = cameras.filter((camera) => camera.can_scan === false).map((camera) => camera.host);
+  if (!cameras.length) return;
   if (enabled) {
-    await startCameraHosts(hosts);
+    scanHosts.forEach((host) => setCameraTransition(host, "opening"));
+    try {
+      const results = scanHosts.length ? await startCameraHosts(scanHosts) : [];
+      const failed = results.filter((item) => !item.ok);
+      if (failed.length) {
+        const detail = failed[0]?.data?.detail;
+        setStatus(typeof detail === "string" ? detail : t("cam_open_error"));
+      }
+      await Promise.all(viewHosts.map((host) => openCamera(host)));
+      startWorkerEvents();
+    } finally {
+      scanHosts.forEach((host) => setCameraTransition(host, ""));
+    }
   } else {
-    await api("/api/worker/stop-all", { method: "POST" });
-    await refreshWorker();
+    const active = cameras.map((camera) => camera.host).filter((host) => {
+      const live = liveCamera(host);
+      return live?.live || live?.starting;
+    });
+    active.forEach((host) => setCameraTransition(host, "stopping"));
+    try {
+      const response = await api("/api/worker/stop-all", { method: "POST" });
+      if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
+      await refreshWorker();
+    } finally {
+      active.forEach((host) => setCameraTransition(host, ""));
+    }
   }
   setStatus(enabled ? t("scanning") : t("ready"));
 }
 
+async function stopCamera(host) {
+  if (!host || cameraTransition(host)) return;
+  setCameraTransition(host, "stopping");
+  try {
+    const response = await api("/api/worker/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host }),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `HTTP ${response.status}`);
+    }
+    await refreshWorker();
+    setStatus(t("ready"));
+  } finally {
+    setCameraTransition(host, "");
+  }
+}
+
 async function openCamera(host) {
-  if (!can("scan.camera")) {
+  const camera = (state.ipCameras || []).find((item) => item.host === (host || cameraRef()));
+  if (!camera || camera.can_view === false) {
     setStatus(t("no_permission"));
     return;
   }
@@ -2272,17 +2427,19 @@ async function openCamera(host) {
     setStatus(t("ip_camera_add_placeholder"));
     return;
   }
-  if (state.liveOpening) return;
+  if (cameraTransition(target)) return;
   const current = liveCamera(target);
   if (current?.live && !host) {
     await toggleCamera(target);
     return;
   }
+  const scansPlates = camera.can_scan !== false && can("scan.camera");
+  setCameraTransition(target, "opening");
   state.liveOpening = true;
   $("camStart").disabled = true;
-  setStatus(t("cam_live", { host: target }));
+  setStatus(scansPlates ? t("scanning") : t("cam_live", { host: target }));
   try {
-    const response = await api("/api/cameras/live", {
+    const response = await api(scansPlates ? "/api/worker/start" : "/api/cameras/live", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ host: target, roi: roiFor(target) }),
@@ -2307,22 +2464,18 @@ async function openCamera(host) {
     }
     state.selectedHost = data.host || target;
     await refreshWorker();
-    setStatus(t("cam_live", { host: data.host || target }));
+    setStatus(data.starting ? t("camera_starting") : scansPlates ? t("scanning") : t("cam_live", { host: data.host || target }));
     startWorkerEvents();
   } finally {
+    setCameraTransition(target, "");
     state.liveOpening = false;
     $("camStart").disabled = false;
   }
 }
 
 async function stopLivePreview() {
-  stopWorkerEvents(false);
-  try {
-    await api("/api/cameras/live/stop", { method: "POST" });
-  } catch {
-    /* still close the UI if the session already ended */
-  }
-  await refreshWorker().catch(() => {});
+  const host = selectedCameraHost();
+  if (host) await stopCamera(host);
 }
 
 async function snapshot(host) {
@@ -2400,6 +2553,7 @@ async function loadHealth() {
     }
     if ($("computeMode") && data.compute) $("computeMode").value = data.compute;
     state.ipCameras = Array.isArray(data.ip_cameras) ? data.ip_cameras : [];
+    state.cameraAccessAvailable = state.ipCameras.length > 0;
     state.cameraStorage = data.camera_storage || (data.database === "ok" ? "database" : "file");
     if ($("cameraStorageStatus")) {
       $("cameraStorageStatus").textContent = state.cameraStorage === "database"
@@ -2409,6 +2563,7 @@ async function loadHealth() {
     ensureCameraRois();
     state.ipCameraConfigured = state.ipCameras.length > 0 || Boolean(data.ip_camera);
     renderCameraSelect();
+    applyPermissions();
     if (state.mode === "camera") renderCameraGrid();
     if ($("ipCameraUrl")) $("ipCameraUrl").placeholder = t("ip_camera_add_placeholder");
     if (state.mode === "camera") $("scanBtn").disabled = !canStartScan();
@@ -2585,7 +2740,19 @@ async function loadMe() {
     return false;
   }
   state.user = await response.json();
+  try {
+    const catalogResponse = await fetch("/api/auth/catalog");
+    if (catalogResponse.ok) {
+      const catalog = await catalogResponse.json();
+      state.roleCatalog = Array.isArray(catalog.roles) ? catalog.roles : [];
+      state.statusCatalog = Array.isArray(catalog.statuses) ? catalog.statuses : [];
+      renderRoleCatalog();
+    }
+  } catch (_) {
+    // The built-in role options remain available when the catalog endpoint is unavailable.
+  }
   applyPermissions();
+  startWorkerEvents();
   return true;
 }
 
@@ -3383,7 +3550,10 @@ function bind() {
     draw();
     if (state.mode === "camera") layoutCameraWall();
   });
-  window.addEventListener("pagehide", suspendWorkerEvents);
+  window.addEventListener("pagehide", () => {
+    flushRoiSaves();
+    suspendWorkerEvents();
+  });
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) resumeWorkerEvents();
   });

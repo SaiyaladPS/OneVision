@@ -885,6 +885,46 @@ class StructuredPlatePipelineTests(unittest.TestCase):
             0.90,
         )
 
+    def test_lao_province_beats_a_slightly_higher_thai_lookalike_prefix(self) -> None:
+        """A real VTE crop must not route through Thai just because ບ looks like บ."""
+
+        thai = {
+            "plate_prefix": "บ",
+            "plate_number": "0388",
+            "digit_detection_count": 5,
+            "expected_digit_count": 4,
+            "digit_confidence": 0.9149,
+            "prefix_confidence": 0.9282,
+            "province_code": "",
+            "province": "",
+            "province_confidence": 0.0,
+            "complete": True,
+            "score": 1.2037,
+            "tokens": [],
+        }
+        lao = {
+            "plate_prefix": "ບຂ",
+            "plate_number": "0388",
+            "digit_detection_count": 4,
+            "expected_digit_count": 4,
+            "digit_confidence": 0.907,
+            "prefix_confidence": 0.9004,
+            "province_code": "VTE2",
+            "province": "ນະຄອນຫຼວງວຽງຈັນ",
+            "province_confidence": 0.8843,
+            "complete": True,
+            "score": 1.6594,
+            "tokens": [],
+        }
+
+        chosen = apply_country_layout_priority(
+            {"country": "thai", "raw_country": "thai", "confidence": 0.60, "margin": 0.02},
+            {"thai": thai, "lao": lao},
+        )
+
+        self.assertEqual(chosen["country"], "lao")
+        self.assertEqual(chosen["selection_reason"], "lao_script_priority")
+
     def test_lao_province_does_not_override_complete_thai_truck(self) -> None:
         thai = {
             "plate_prefix": "70",
