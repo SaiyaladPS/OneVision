@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from src.car_scan.realtime import publish_event
 from src.car_scan.web import _parse_roi, create_app, reset_runtime_state
 
 
@@ -88,6 +89,28 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(payload["type"], "ROI_UPDATED")
         self.assertEqual(payload["data"]["host"], "192.168.100.50")
         self.assertEqual(payload["data"]["roi"]["x"], 0.2)
+
+    def test_report_websocket_receives_persisted_plate_events(self) -> None:
+        headers = {"origin": "http://localhost:3000"}
+        with self.client.websocket_connect("/ws/report", headers=headers) as report_socket:
+            connected = report_socket.receive_json()
+            self.assertEqual(connected["type"], "CONNECTED")
+            publish_event(
+                "PLATE_SAVED",
+                scan_id=42,
+                plate={
+                    "id": 99,
+                    "country": "lao",
+                    "province": "VTE2",
+                    "plate_prefix": "ບຂ",
+                    "plate_number": "0388",
+                    "confidence_level": "HIGH",
+                },
+            )
+            payload = report_socket.receive_json()
+        self.assertEqual(payload["type"], "PLATE_SAVED")
+        self.assertEqual(payload["data"]["scan_id"], 42)
+        self.assertEqual(payload["data"]["plate"]["plate_number"], "0388")
 
     def test_home_page_redirects_when_anonymous(self) -> None:
         response = self.client.get("/", follow_redirects=False)

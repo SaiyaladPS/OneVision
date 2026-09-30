@@ -1608,10 +1608,18 @@ def build_plate_quality(
         prefix_missing = 0
     digit_complete = len(str(plate_number or "")) == 4 and str(plate_number or "").isdigit()
     province_complete = bool(primary.get("province_code") or primary.get("province"))
+    # A character model returning ``unknown`` is unresolved evidence even when
+    # the other country's model can assemble a plausible registration.  Keep
+    # those samples out of the automatic PASS/export path for manual review.
     unknown = any(
         str(token.get("label", "")).strip().lower() in {"unknown", "unk", "?"}
-        for token in primary.get("tokens", [])
+        for reading in readings.values()
+        if isinstance(reading, dict)
+        for token in reading.get("tokens", [])
         if isinstance(token, dict)
+    ) or any(
+        str(value).strip().lower() in {"unknown", "unk", "unrecognized", "?"}
+        for value in (country, plate_prefix, plate_number, ocr.get("text", ""))
     )
     missing = max(0, expected_digits - detected_digits) + prefix_missing
     reasons: list[str] = []
@@ -3182,6 +3190,43 @@ class LicensePlateScanner:
         )
         return annotated
 
+    @staticmethod
+    def _draw_plate_detection(
+        annotated: np.ndarray,
+        box: Iterable[float],
+        confidence: float,
+        *,
+        inside_roi: bool,
+    ) -> None:
+        """Show every CCTV plate hit, including plates waiting to enter the ROI.
+
+        Orange is intentionally a *detected but not yet scanned* state. The
+        detector still sees the full frame, but crop/OCR only begins after the
+        plate centre reaches the ROI; this both explains the UI state and
+        avoids processing a partial plate at the edge of the scan zone.
+        """
+
+        height, width = annotated.shape[:2]
+        x1, y1, x2, y2 = [int(round(value)) for value in box]
+        x1, x2 = max(0, min(width - 1, x1)), max(0, min(width - 1, x2))
+        y1, y2 = max(0, min(height - 1, y1)), max(0, min(height - 1, y2))
+        if x2 <= x1 or y2 <= y1:
+            return
+        colour = (0, 190, 0) if inside_roi else (0, 165, 255)
+        status = "SCANNING" if inside_roi else "WAIT ROI"
+        label = f"PLATE {float(confidence):.0%} {status}"
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), colour, 2)
+        cv2.putText(
+            annotated,
+            label,
+            (x1, max(22, y1 - 7)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            colour,
+            2,
+            cv2.LINE_AA,
+        )
+
     def _vehicle_types(
         self,
         image: np.ndarray,
@@ -3919,6 +3964,8 @@ class LicensePlateScanner:
         self.last_plate_detection_count = (
             len(detections.boxes) if detections.boxes is not None else 0
         )
+        self.last_roi_plate_detection_count = 0
+        self.last_roi_waiting_detection_count = 0
         if detections.boxes is None or len(detections.boxes) == 0:
             self.last_vehicle_types = vehicle_types
             self._draw_vehicle_types(annotated, vehicle_types)
@@ -3939,8 +3986,20 @@ class LicensePlateScanner:
             start=1,
         ):
             xyxy = [float(value) for value in xyxy]
-            if not self._box_inside_scan_roi(xyxy, image):
+            inside_roi = self._box_inside_scan_roi(xyxy, image)
+            self._draw_plate_detection(
+                annotated,
+                xyxy,
+                float(confidence),
+                inside_roi=inside_roi,
+            )
+            if not inside_roi:
+                self.last_roi_waiting_detection_count += 1
                 continue
+            self.last_roi_plate_detection_count += 1
+            # This is deliberately before complete_detector_crop: a box that
+            # has not entered the ROI is preview-only and must never reach the
+            # crop, recognition, or archive stages.
             crop, crop_box, crop_status = complete_detector_crop(image, xyxy, padding)
             if crop is None or crop_box is None or crop_status != "full":
                 continue

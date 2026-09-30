@@ -523,6 +523,11 @@ class Settings:
     # distant/blurred frame should not become the permanent live result.
     camera_min_confirmations: int = 2
     camera_infer_max_dimension: int = 1920
+    # A normal lane is sampled often enough to spot an approaching vehicle.
+    # Once a plate is near/in the ROI it temporarily receives more frequent
+    # inference so a fast-moving vehicle has several usable frames.
+    camera_idle_submit_interval: float = 0.18
+    camera_hot_submit_interval: float = 0.08
     temporal_min_quality: float = 0.58
     target_fps: float = 24.0
     # Preview delivery is deliberately independent from capture/inference.
@@ -588,6 +593,12 @@ class Settings:
             ),
             camera_infer_max_dimension=max(
                 640, int(os.getenv("CAR_SCAN_CAMERA_INFER_MAX_DIMENSION", "1920"))
+            ),
+            camera_idle_submit_interval=max(
+                0.04, float(os.getenv("CAR_SCAN_CAMERA_IDLE_SUBMIT_INTERVAL", "0.18"))
+            ),
+            camera_hot_submit_interval=max(
+                0.03, float(os.getenv("CAR_SCAN_CAMERA_HOT_SUBMIT_INTERVAL", "0.08"))
             ),
             temporal_min_quality=max(
                 0.0, float(os.getenv("CAR_SCAN_TEMPORAL_MIN_QUALITY", "0.58"))

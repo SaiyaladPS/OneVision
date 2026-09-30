@@ -46,6 +46,10 @@ class LiveScanSession:
     cached_until_frame: int = 0
     sampled_frames: int = 0
     last_detect_count: int = 0
+    # Detector hits outside the ROI are visualised but never cropped/OCR'd.
+    # Keeping this count lets the live worker increase sampling just before a
+    # fast vehicle reaches the configured scan area.
+    roi_waiting_count: int = 0
     last_published: list[dict[str, Any]] = field(default_factory=list)
     pending_ocr: list[tuple[dict[str, Any], Any]] = field(default_factory=list)
     # Frame index of the previous processed sample and the resulting track
@@ -565,6 +569,7 @@ class ScanService:
         )
         session.cached_vehicle_types = next_types
         session.last_detect_count = int(getattr(scanner, "last_plate_detection_count", len(plates)))
+        session.roi_waiting_count = int(getattr(scanner, "last_roi_waiting_detection_count", 0))
         annotated = self._update_stream_overlay(
             session,
             scanner,

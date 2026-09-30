@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hmac
 import io
 import json
 import logging
@@ -97,6 +98,35 @@ def _max_upload_label() -> str:
     if megabytes >= 1024:
         return f"{megabytes / 1024:g}GB"
     return f"{megabytes}MB"
+
+
+def _report_websocket_authorized(websocket: WebSocket) -> bool:
+    """Authorize the read-only event stream consumed by OneVision-report.
+
+    The normal ``/ws`` endpoint uses a Car Scan login cookie. That cookie is
+    intentionally not shared with the Nuxt app on port 3000, so the report
+    application needs its own narrow, read-only subscription. Production
+    deployments can require a shared token; local development permits only
+    explicit report origins by default.
+    """
+
+    configured_token = str(os.getenv("ONEVISION_REPORT_WS_TOKEN") or "").strip()
+    supplied_token = str(websocket.query_params.get("token") or "")
+    if configured_token:
+        return bool(supplied_token) and hmac.compare_digest(supplied_token, configured_token)
+
+    allowed_origins = {
+        value.strip().rstrip("/")
+        for value in str(
+            os.getenv(
+                "ONEVISION_REPORT_WS_ALLOWED_ORIGINS",
+                "http://localhost:3000,http://127.0.0.1:3000",
+            )
+        ).split(",")
+        if value.strip()
+    }
+    origin = str(websocket.headers.get("origin") or "").strip().rstrip("/")
+    return bool(origin) and origin in allowed_origins
 
 _JOBS: dict[str, "ScanJob"] = {}
 _JOBS_LOCK = threading.Lock()
@@ -1047,6 +1077,21 @@ def create_app() -> FastAPI:
                 host,
                 "can_view",
             ),
+        )
+
+    @app.websocket("/ws/report")
+    async def onevision_report_websocket(websocket: WebSocket):
+        """Stream persisted scan events to the separate OneVision-report UI."""
+
+        if not _report_websocket_authorized(websocket):
+            await websocket.close(code=1008)
+            return
+        await serve_websocket(
+            websocket,
+            user_id=0,
+            session_id="onevision-report",
+            event_filter=lambda event: str(event.get("type") or "")
+            in {"PLATE_SAVED", "SCAN_SAVED", "REPORT_READY"},
         )
 
     @app.get("/api/cameras")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -38,6 +40,58 @@ def box(text: str, confidence: float, x: float, y: float, width: float = 10, hei
 
 
 class StructuredPlatePipelineTests(unittest.TestCase):
+    def test_cctv_detection_waits_for_roi_before_creating_a_crop(self) -> None:
+        """An approaching plate is drawn, but crop/OCR starts only inside ROI."""
+
+        import scan
+
+        class Tensor:
+            def __init__(self, value):
+                self.value = value
+
+            def cpu(self):
+                return self
+
+            def tolist(self):
+                return self.value
+
+            def __len__(self):
+                return len(self.value)
+
+        scanner = scan.LicensePlateScanner.__new__(scan.LicensePlateScanner)
+        scanner.scan_roi = scan.LicensePlateScanner._normalise_scan_roi(
+            {"enabled": True, "shape": "rectangle", "x": 0.5, "y": 0.0, "width": 0.5, "height": 1.0}
+        )
+        scanner.pipeline_mode = "auto"
+        scanner.detector = SimpleNamespace(names={0: "license"})
+        scanner._draw_vehicle_types = lambda image, vehicles: None
+        class Boxes:
+            xyxy = Tensor([[10.0, 20.0, 40.0, 40.0]])
+            conf = Tensor([0.91])
+            cls = Tensor([0.0])
+
+            def __len__(self):
+                return len(self.xyxy)
+
+        detections = SimpleNamespace(boxes=Boxes())
+        frame = np.zeros((80, 120, 3), dtype=np.uint8)
+        with patch.object(scan, "yolo_predict", return_value=[detections]), patch.object(
+            scan, "complete_detector_crop"
+        ) as crop:
+            records, annotated = scanner.scan(
+                frame,
+                detector_confidence=0.35,
+                character_confidence=0.20,
+                padding=0.03,
+                imgsz=640,
+                vehicle_types_override=[],
+            )
+
+        self.assertEqual(records, [])
+        crop.assert_not_called()
+        self.assertEqual(scanner.last_roi_waiting_detection_count, 1)
+        self.assertEqual(tuple(annotated[20, 10]), (0, 165, 255))
+
     def test_country_models_do_not_run_without_a_detect_license_crop(self) -> None:
         class Model:
             def predict(self, *args: object, **kwargs: object) -> list[object]:
@@ -374,6 +428,27 @@ class StructuredPlatePipelineTests(unittest.TestCase):
         self.assertEqual(quality["character_validation"]["primary_detected_digit_count"], 4)
         self.assertEqual(quality["character_validation"]["secondary_detected_digit_count"], 4)
         self.assertEqual(quality["dataset"]["export_status"], "PASS")
+
+    def test_unknown_token_from_either_country_model_requires_review(self) -> None:
+        readings = {
+            "lao": {
+                "plate_prefix": "ບບ", "plate_number": "9955", "digit_detection_count": 4,
+                "digit_confidence": 1.0, "character_confidence": 1.0,
+                "province_code": "VTE", "province_confidence": 1.0, "tokens": [],
+            },
+            "thai": {"tokens": [{"label": "unknown"}]},
+        }
+
+        quality = build_plate_quality(
+            country="lao", primary_country="lao", readings=readings,
+            plate_prefix="ບບ", plate_number="9955", ocr={"confidence": 1.0},
+            validation={"valid": True}, detection_confidence=1.0, country_confidence=1.0,
+            digit_evidence={"status": "agree"},
+        )
+
+        self.assertEqual(quality["qc"]["status"], "REVIEW")
+        self.assertIn("unknown_character", quality["qc"]["reason"])
+        self.assertEqual(quality["dataset"]["export_status"], "REJECT")
 
     def test_cross_model_conflict_requires_review_even_when_lao_layout_is_complete(self) -> None:
         readings = {

@@ -29,10 +29,6 @@ FIRST_FRAME_READ_ATTEMPTS = 4
 FIRST_FRAME_READ_DELAY_SECONDS = 0.20
 STOP_JOIN_TIMEOUT_SECONDS = 0.05
 SHUTDOWN_JOIN_TIMEOUT_SECONDS = 1.5
-# Capture submits at most this often; the hub already keeps only the latest
-# pending frame per lane, so extra decodes only make the live view hitch.
-IDLE_SUBMIT_GAP = 0.28
-HOT_SUBMIT_GAP = 0.12
 # A lane stays "hot" this long after it last saw an unconfirmed plate. Hot
 # lanes submit frames more often and are inferred first; idle lanes keep a
 # slower heartbeat so a passing car gets several samples instead of one or two.
@@ -321,6 +317,7 @@ class CameraLane:
     capture: Any = None
     roi: dict[str, Any] | None = None
     last_detect_count: int = 0
+    roi_waiting_count: int = 0
     fps: float = 0.0
     # Monotonic deadline while this lane is tracking a plate that has not
     # been confirmed yet; the hub and the capture loop sample it more often.
@@ -381,6 +378,7 @@ class CameraLane:
                 "last_plate": last_plate,
                 "sampled_frames": self.session.sampled_frames,
                 "last_detect_count": self.session.last_detect_count,
+                "roi_waiting_count": self.session.roi_waiting_count,
                 "plates": [client_live_plate(plate) for plate in self.plates],
                 "has_frame": self.jpeg is not None,
                 "roi": dict(self.roi) if self.roi else None,
@@ -661,7 +659,11 @@ class CameraLane:
                 need_preview = now - last_preview >= preview_gap or not self.ready.is_set()
                 need_keep = now - last_keep >= 0.45
                 infer_due = self.scanning and (
-                    now - last_submit >= (HOT_SUBMIT_GAP if self.hot else IDLE_SUBMIT_GAP)
+                    now - last_submit >= (
+                        self.settings.camera_hot_submit_interval
+                        if self.hot
+                        else self.settings.camera_idle_submit_interval
+                    )
                 )
                 if pending is not None:
                     frame = pending
@@ -1047,8 +1049,9 @@ class GpuHub:
                     lane.session.pending_ocr = []
                 lane.sampled_frames = lane.session.sampled_frames
                 lane.last_detect_count = lane.session.last_detect_count
+                lane.roi_waiting_count = lane.session.roi_waiting_count
                 lane.last_infer_at = time.monotonic()
-                if self._tracking_unconfirmed(lane, frame_index):
+                if lane.roi_waiting_count > 0 or self._tracking_unconfirmed(lane, frame_index):
                     lane.hot_until = lane.last_infer_at + HOT_LANE_SECONDS
                 if published:
                     lane.publish_records(published)

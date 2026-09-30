@@ -24,6 +24,7 @@ class _Subscriber:
     session_id: str
     worker_snapshot_filter: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     camera_event_filter: Callable[[str], bool] | None = None
+    event_filter: Callable[[dict[str, Any]], bool] | None = None
 
 
 class OneVisionEventHub:
@@ -46,6 +47,7 @@ class OneVisionEventHub:
         session_id: str,
         worker_snapshot_filter: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         camera_event_filter: Callable[[str], bool] | None = None,
+        event_filter: Callable[[dict[str, Any]], bool] | None = None,
     ) -> _Subscriber:
         await websocket.accept()
         subscriber = _Subscriber(
@@ -56,6 +58,7 @@ class OneVisionEventHub:
             session_id=str(session_id),
             worker_snapshot_filter=worker_snapshot_filter,
             camera_event_filter=camera_event_filter,
+            event_filter=event_filter,
         )
         with self._lock:
             self._subscribers[uuid.uuid4().hex] = subscriber
@@ -208,6 +211,7 @@ async def serve_websocket(
     session_id: str,
     worker_snapshot_filter: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     camera_event_filter: Callable[[str], bool] | None = None,
+    event_filter: Callable[[dict[str, Any]], bool] | None = None,
 ) -> None:
     subscriber = await event_hub.connect(
         websocket,
@@ -215,6 +219,7 @@ async def serve_websocket(
         session_id=session_id,
         worker_snapshot_filter=worker_snapshot_filter,
         camera_event_filter=camera_event_filter,
+        event_filter=event_filter,
     )
     sender = asyncio.create_task(_send_events(subscriber))
     try:
@@ -232,6 +237,13 @@ async def _send_events(subscriber: _Subscriber) -> None:
     try:
         while True:
             event = await subscriber.queue.get()
+            if subscriber.event_filter:
+                try:
+                    if not subscriber.event_filter(event):
+                        continue
+                except Exception:
+                    LOGGER.exception("Unable to filter websocket event")
+                    continue
             if event.get("type") == "ROI_UPDATED" and subscriber.camera_event_filter:
                 host = str((event.get("data") or {}).get("host") or "")
                 try:
