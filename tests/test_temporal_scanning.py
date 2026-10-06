@@ -814,13 +814,13 @@ class TemporalScanningTests(unittest.TestCase):
         date_text = datetime.now().strftime("%Y%m%d")
         self.assertEqual(full_path.parent.parent.name, date_text)
         self.assertEqual(full_path.parent.name, "thai")
-        self.assertEqual(full_path.name, f"0-BKK-63-7998-{date_text}-001-full_vehicle.jpg")
-        self.assertEqual(crop_path.name, f"0-BKK-63-7998-{date_text}-001-plate_crops.jpg")
+        self.assertEqual(full_path.name, f"0-BKK-63-7998-{date_text}-001-full_vehicle.webp")
+        self.assertEqual(crop_path.name, f"0-BKK-63-7998-{date_text}-001-plate_crops.webp")
         self.assertEqual(ready_path, crop_path)
         self.assertTrue(ready_path.is_file())
         self.assertIsNone(character_path)
         self.assertEqual(
-            sorted(path.name for path in full_path.parent.glob("*.jpg")),
+            sorted(path.name for path in full_path.parent.glob("*.webp")),
             sorted((full_path.name, crop_path.name)),
         )
 

@@ -66,6 +66,7 @@ from .database import (
     merge_history_operators,
     resolve_stored_path,
 )
+from .report_storage import central_storage_file_id, fetch_remote_image
 from .service import ScanService
 from .worker import WorkerPool
 from .realtime import event_hub, publish_roi_event, serve_websocket
@@ -133,6 +134,16 @@ _JOBS_LOCK = threading.Lock()
 _SCAN_LOCK = threading.Lock()
 _WORKER: WorkerPool | None = None
 _WORKER_LOCK = threading.Lock()
+_CAMERA_RECORDS_LOCK = threading.Lock()
+_CAMERA_RECORDS_CACHE: dict[str, list[dict[str, Any]]] = {}
+_CAMERA_RECORDS_RETRY_UNTIL: dict[str, float] = {}
+_CAMERA_RECORDS_LOADING: set[str] = set()
+_CAMERA_SCHEMA_READY: set[str] = set()
+_CAMERA_DB_RETRY_SECONDS = 15.0
+_DATABASE_HEALTH_LOCK = threading.Lock()
+_DATABASE_HEALTH_STATUS: dict[str, str] = {}
+_DATABASE_HEALTH_RETRY_UNTIL: dict[str, float] = {}
+_DATABASE_HEALTH_PROBING: set[str] = set()
 
 
 def _jsonable(value: Any) -> Any:
@@ -299,22 +310,51 @@ def _safe_scan_image(settings: Settings, raw: str | None) -> Path | None:
     return path
 
 
+def _remote_scan_image(settings: Settings, raw: str | None) -> str | None:
+    return central_storage_file_id(raw, settings.output_dir)
+
+
+def _image_available(settings: Settings, raw: str | None) -> bool:
+    return _safe_scan_image(settings, raw) is not None or (
+        _remote_scan_image(settings, raw) is not None and bool(os.getenv("STORAGE_SERVICE_API_TOKEN", "").strip())
+    )
+
+
+def _image_response(settings: Settings, raw: str | None) -> Response:
+    path = _safe_scan_image(settings, raw)
+    if path is not None:
+        return FileResponse(
+            path,
+            media_type=IMAGE_TYPES[path.suffix.lower()],
+            filename=path.name,
+            content_disposition_type="inline",
+        )
+    file_id = _remote_scan_image(settings, raw)
+    fetched = fetch_remote_image(file_id)
+    if fetched is None:
+        raise HTTPException(status_code=404, detail="ไม่พบภาพในเครื่องหรือ OneVision Report")
+    content, content_type = fetched
+    return Response(content=content, media_type=content_type, headers={"Cache-Control": "private, max-age=300"})
+
+
 def _public_saved_plate(settings: Settings, scan_id: int, plate: dict[str, Any]) -> dict[str, Any]:
-    vehicle = _safe_scan_image(settings, plate.get("full_vehicle_image"))
-    crop = _safe_scan_image(settings, plate.get("crop_image"))
+    vehicle_raw = plate.get("full_vehicle_image")
+    crop_raw = plate.get("crop_image")
     payload = {
         key: value
         for key, value in plate.items()
         if key not in {"full_vehicle_image", "crop_image"}
     }
     plate_id = plate.get("id")
-    payload["has_vehicle"] = vehicle is not None
-    payload["has_crop"] = crop is not None
+    has_vehicle = _image_available(settings, vehicle_raw)
+    has_crop = _image_available(settings, crop_raw)
+    payload["has_vehicle"] = has_vehicle
+    payload["has_crop"] = has_crop
     payload["vehicle_url"] = (
-        f"/api/scans/{scan_id}/plates/{plate_id}/vehicle" if plate_id is not None and vehicle is not None else None
+        f"/api/scans/{scan_id}/plates/{plate_id}/vehicle" if plate_id is not None and has_vehicle else None
     )
     payload["crop_url"] = (
-        f"/api/scans/{scan_id}/plates/{plate_id}/crop" if plate_id is not None and crop is not None else None
+        f"/api/scans/{scan_id}/plates/{plate_id}/crop" if plate_id is not None and has_crop else None
     )
     return payload
 
@@ -322,9 +362,9 @@ def _public_saved_plate(settings: Settings, scan_id: int, plate: dict[str, Any])
 def _public_saved_scan(settings: Settings, row: dict[str, Any]) -> dict[str, Any]:
     scan_id = int(row["id"])
     payload = dict(row)
-    image = _safe_scan_image(settings, row.get("annotated_image"))
-    payload["has_image"] = image is not None
-    payload["image_url"] = f"/api/scans/{scan_id}/image" if image is not None else None
+    image_available = _image_available(settings, row.get("annotated_image"))
+    payload["has_image"] = image_available
+    payload["image_url"] = f"/api/scans/{scan_id}/image" if image_available else None
     payload["plates"] = [_public_saved_plate(settings, scan_id, plate) for plate in row.get("plates") or []]
     payload.pop("annotated_image", None)
     return payload
@@ -345,7 +385,7 @@ def _scan_repository(settings: Settings) -> DatabaseRepository:
     return repository
 
 
-def _serve_plate_image(request: Request, scan_id: int, plate_id: int, kind: str) -> FileResponse:
+def _serve_plate_image(request: Request, scan_id: int, plate_id: int, kind: str) -> Response:
     require_user(request)
     settings = Settings.from_env()
     if not settings.database_url:
@@ -357,26 +397,25 @@ def _serve_plate_image(request: Request, scan_id: int, plate_id: int, kind: str)
     plate = _plate_from_scan(row, plate_id)
     if plate is None:
         raise HTTPException(status_code=404, detail="ไม่พบป้ายในรายการนี้")
-    path = _safe_scan_image(settings, plate.get("full_vehicle_image" if kind == "vehicle" else "crop_image"))
-    if path is None and kind == "vehicle":
-        path = _safe_scan_image(settings, (row or {}).get("annotated_image"))
-    if path is None:
+    raw = plate.get("full_vehicle_image" if kind == "vehicle" else "crop_image")
+    if not _image_available(settings, raw) and kind == "vehicle":
+        raw = (row or {}).get("annotated_image")
+    if not _image_available(settings, raw):
         raise HTTPException(status_code=404, detail="ไม่มีรูปรถของรายการนี้" if kind == "vehicle" else "ไม่มีรูปป้ายของรายการนี้")
-    return FileResponse(path, media_type=IMAGE_TYPES[path.suffix.lower()], filename=path.name)
+    return _image_response(settings, raw)
 
 
-def _serve_worker_plate_image(request: Request, host: str, plate_id: int, kind: str) -> FileResponse:
+def _serve_worker_plate_image(request: Request, host: str, plate_id: int, kind: str) -> Response:
     user = require_user(request)
     settings = Settings.from_env()
     _require_camera_view_or_scan(settings, user, host)
     raw = _worker().plate_image(host, plate_id, kind)
-    path = _safe_scan_image(settings, raw)
-    if path is None:
+    if not _image_available(settings, raw):
         raise HTTPException(
             status_code=404,
             detail="ไม่มีรูปรถของป้ายนี้" if kind == "vehicle" else "ไม่มีรูปครอปของป้ายนี้",
         )
-    return FileResponse(path, media_type=IMAGE_TYPES[path.suffix.lower()], filename=path.name)
+    return _image_response(settings, raw)
 
 
 @dataclass
@@ -510,6 +549,15 @@ def reset_runtime_state() -> None:
     with _WORKER_LOCK:
         worker = _WORKER
         _WORKER = None
+    with _CAMERA_RECORDS_LOCK:
+        _CAMERA_RECORDS_CACHE.clear()
+        _CAMERA_RECORDS_RETRY_UNTIL.clear()
+        _CAMERA_RECORDS_LOADING.clear()
+        _CAMERA_SCHEMA_READY.clear()
+    with _DATABASE_HEALTH_LOCK:
+        _DATABASE_HEALTH_STATUS.clear()
+        _DATABASE_HEALTH_RETRY_UNTIL.clear()
+        _DATABASE_HEALTH_PROBING.clear()
     if worker is not None:
         worker.stop_all()
 
@@ -621,9 +669,6 @@ def _iter_mjpeg(lane: Any):
         with lane.lock:
             seq = lane.seq
             jpeg = lane.jpeg
-            opened = lane.opened
-        if last != -1 and not opened:
-            break
         if jpeg and seq != last:
             last = seq
             misses = 0
@@ -655,25 +700,32 @@ def _camera_host(url: str, fallback: str = "") -> str:
     return urlsplit(url).hostname or str(fallback or "").strip()
 
 
-def _camera_records(settings: Settings) -> list[dict[str, Any]]:
-    """Read camera settings from PostgreSQL and migrate the legacy JSON store."""
+def _legacy_camera_records(legacy: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "host": item.get("host", ""),
+            "stream_url": item.get("url", ""),
+            "label": item.get("label", ""),
+            "kind": "local" if parse_local_camera(item.get("url", "") or item.get("host", "")) else "ip",
+            "device_index": (parse_local_camera(item.get("url", "") or item.get("host", "")) or ("", None))[1],
+            "enabled": True,
+        }
+        for item in legacy
+    ]
 
-    legacy = load_extra_cameras(settings.output_dir)
-    if not settings.database_url:
-        return [
-            {
-                "host": item.get("host", ""),
-                "stream_url": item.get("url", ""),
-                "label": item.get("label", ""),
-                "kind": "local" if parse_local_camera(item.get("url", "") or item.get("host", "")) else "ip",
-                "device_index": (parse_local_camera(item.get("url", "") or item.get("host", "")) or ("", None))[1],
-                "enabled": True,
-            }
-            for item in legacy
-        ]
+
+def _load_camera_records_background(settings: Settings, database_key: str, legacy: list[dict[str, Any]]) -> None:
+    """Load/migrate shared camera settings without blocking an HTTP request."""
+
+    now = time.monotonic()
     try:
-        repository = DatabaseRepository(settings.database_url)
-        repository.ensure_camera_storage()
+        repository = DatabaseRepository(database_key)
+        with _CAMERA_RECORDS_LOCK:
+            schema_ready = database_key in _CAMERA_SCHEMA_READY
+        if not schema_ready:
+            repository.ensure_camera_storage()
+            with _CAMERA_RECORDS_LOCK:
+                _CAMERA_SCHEMA_READY.add(database_key)
         rows = repository.list_cameras(enabled_only=False)
         known = {str(item["host"]).lower() for item in rows}
         first_database_boot = not rows
@@ -682,54 +734,116 @@ def _camera_records(settings: Settings) -> list[dict[str, Any]]:
         seeds: list[tuple[str, str, str, str, int | None]] = []
         for url in settings.ip_camera_urls:
             local = parse_local_camera(url)
-            seeds.append(
-                (
-                    _camera_host(url),
-                    url,
-                    "local" if local else "ip",
-                    "",
-                    local[1] if local else None,
-                )
-            )
+            seeds.append((_camera_host(url), url, "local" if local else "ip", "", local[1] if local else None))
         if first_database_boot:
             for item in legacy:
                 raw_url = str(item.get("url") or "")
                 raw_host = str(item.get("host") or "")
                 local = parse_local_camera(raw_url or raw_host)
-                seeds.append(
-                    (
-                        raw_host,
-                        raw_url,
-                        "local" if local else "ip",
-                        str(item.get("label") or ""),
-                        local[1] if local else None,
-                    )
-                )
+                seeds.append((raw_host, raw_url, "local" if local else "ip", str(item.get("label") or ""), local[1] if local else None))
         for host, url, kind, label, device_index in seeds:
             if not host or host.lower() in known:
                 continue
-            repository.upsert_camera(
-                host,
-                url,
-                label if label else None,
-                kind=kind,
-                device_index=device_index,
-            )
+            repository.upsert_camera(host, url, label if label else None, kind=kind, device_index=device_index)
             known.add(host.lower())
-        return repository.list_cameras(enabled_only=True)
-    except Exception:
-        LOGGER.exception("Unable to read CCTV settings from PostgreSQL; using legacy file")
-        return [
-            {
-                "host": item.get("host", ""),
-                "stream_url": item.get("url", ""),
-                "label": item.get("label", ""),
-                "kind": "ip",
-                "device_index": None,
-                "enabled": True,
-            }
-            for item in legacy
-        ]
+        rows = repository.list_cameras(enabled_only=True)
+        with _CAMERA_RECORDS_LOCK:
+            _CAMERA_RECORDS_CACHE[database_key] = [dict(item) for item in rows]
+            _CAMERA_RECORDS_RETRY_UNTIL.pop(database_key, None)
+    except Exception as error:
+        with _CAMERA_RECORDS_LOCK:
+            _CAMERA_RECORDS_RETRY_UNTIL[database_key] = now + _CAMERA_DB_RETRY_SECONDS
+        LOGGER.warning(
+            "CCTV database unavailable; using cached/file camera settings for %.0fs: %s",
+            _CAMERA_DB_RETRY_SECONDS,
+            error,
+        )
+    finally:
+        with _CAMERA_RECORDS_LOCK:
+            _CAMERA_RECORDS_LOADING.discard(database_key)
+
+
+def _camera_records(settings: Settings) -> list[dict[str, Any]]:
+    """Return cached camera settings and load PostgreSQL in the background."""
+
+    legacy = load_extra_cameras(settings.output_dir)
+    fallback = _legacy_camera_records(legacy)
+    if not settings.database_url:
+        return fallback
+
+    database_key = settings.database_url.strip()
+    now = time.monotonic()
+    with _CAMERA_RECORDS_LOCK:
+        cached = _CAMERA_RECORDS_CACHE.get(database_key)
+        retry_until = _CAMERA_RECORDS_RETRY_UNTIL.get(database_key, 0.0)
+        loading = database_key in _CAMERA_RECORDS_LOADING
+        if not loading and retry_until <= now:
+            _CAMERA_RECORDS_LOADING.add(database_key)
+            should_load = True
+        else:
+            should_load = False
+    if should_load:
+        threading.Thread(
+            target=_load_camera_records_background,
+            args=(settings, database_key, legacy),
+            name="postgres-camera-settings",
+            daemon=True,
+        ).start()
+    return [dict(item) for item in (cached or fallback)]
+
+
+def _invalidate_camera_records_cache(database_url: str) -> None:
+    key = str(database_url or "").strip()
+    if not key:
+        return
+    with _CAMERA_RECORDS_LOCK:
+        _CAMERA_RECORDS_CACHE.pop(key, None)
+        _CAMERA_RECORDS_RETRY_UNTIL.pop(key, None)
+
+
+def _probe_database_health(database_key: str) -> None:
+    """Probe PostgreSQL outside the request thread.
+
+    A down database must not hold the browser's health request open. The
+    first request reports ``checking`` and later requests receive the cached
+    result from this daemon probe.
+    """
+
+    try:
+        DatabaseRepository(database_key).ping()
+    except Exception as error:
+        with _DATABASE_HEALTH_LOCK:
+            _DATABASE_HEALTH_STATUS[database_key] = f"error: {error}"
+            _DATABASE_HEALTH_RETRY_UNTIL[database_key] = time.monotonic() + _CAMERA_DB_RETRY_SECONDS
+    else:
+        with _DATABASE_HEALTH_LOCK:
+            _DATABASE_HEALTH_STATUS[database_key] = "ok"
+            _DATABASE_HEALTH_RETRY_UNTIL.pop(database_key, None)
+    finally:
+        with _DATABASE_HEALTH_LOCK:
+            _DATABASE_HEALTH_PROBING.discard(database_key)
+
+
+def _database_health(settings: Settings) -> str:
+    """Return cached DB status and schedule a non-blocking probe if needed."""
+
+    if not settings.database_url:
+        return "missing"
+    database_key = settings.database_url.strip()
+    now = time.monotonic()
+    with _DATABASE_HEALTH_LOCK:
+        status = _DATABASE_HEALTH_STATUS.get(database_key, "checking")
+        retry_until = _DATABASE_HEALTH_RETRY_UNTIL.get(database_key, 0.0)
+        if database_key in _DATABASE_HEALTH_PROBING or retry_until > now:
+            return status
+        _DATABASE_HEALTH_PROBING.add(database_key)
+    threading.Thread(
+        target=_probe_database_health,
+        args=(database_key,),
+        name="postgres-health-probe",
+        daemon=True,
+    ).start()
+    return status
 
 
 def _camera_urls(settings: Settings) -> tuple[str, ...]:
@@ -770,6 +884,7 @@ def _save_camera_record(
                 kind="local" if local else "ip",
                 device_index=local[1] if local else None,
             )
+            _invalidate_camera_records_cache(settings.database_url)
             return
         except Exception:
             LOGGER.exception("Unable to save CCTV setting to PostgreSQL")
@@ -783,6 +898,7 @@ def _delete_camera_record(settings: Settings, host: str) -> None:
             repository = DatabaseRepository(settings.database_url)
             repository.ensure_camera_storage()
             repository.delete_camera(host)
+            _invalidate_camera_records_cache(settings.database_url)
             return
         except Exception:
             LOGGER.exception("Unable to delete CCTV setting from PostgreSQL")
@@ -791,9 +907,14 @@ def _delete_camera_record(settings: Settings, host: str) -> None:
 
 
 def _camera_permissions(settings: Settings, user: dict[str, Any]) -> dict[str, dict[str, bool]] | None:
-    """Read shared camera permissions; administrators retain full access."""
+    """Read the per-user CCTV permissions shared with OneVision-report.
 
-    if canonical_role(user.get("role")) in {"admin", "superuser"}:
+    ``SUPERUSER`` is the only role with an unconditional camera bypass.  An
+    administrator can manage the access-control page, but their own camera
+    access must still follow the rows saved there.
+    """
+
+    if canonical_role(user.get("role")) == "superuser":
         return None
     if not settings.database_url:
         # A standalone/file-backed deployment has no shared access table. Keep
@@ -838,6 +959,12 @@ def _require_camera_view_or_scan(settings: Settings, user: dict[str, Any], host:
 
 
 def _require_camera_stop_access(settings: Settings, user: dict[str, Any], host: str) -> None:
+    # When shared camera permissions exist, an administrator/operator may
+    # stop only a camera that is visible to them.  SUPERUSER still bypasses
+    # this scope through _camera_permissions().
+    if _camera_permissions(settings, user) is not None:
+        _require_camera_access(settings, user, host, "can_view")
+        return
     if has_permission(user, "scan.camera"):
         return
     _require_camera_access(settings, user, host, "can_view")
@@ -849,6 +976,19 @@ def _require_camera_stop_access(settings: Settings, user: dict[str, Any], host: 
 def _camera_payload(settings: Settings, user: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     cameras = public_cameras(_camera_urls(settings), _builtin_hosts(settings))
     records = _camera_records(settings)
+    known_hosts = {str(camera.get("host") or "").strip().lower() for camera in cameras}
+    # The database is the source of truth for settings.  Add any enabled
+    # database camera that was not present in the legacy/env URL list so a
+    # rename or newly added camera cannot disappear from Car Scan.
+    for record in records:
+        host = str(record.get("host") or "").strip()
+        stored = str(record.get("stream_url") or record.get("url") or "").strip()
+        if not host or host.lower() in known_hosts or not stored:
+            continue
+        candidates = public_cameras((stored,), _builtin_hosts(settings))
+        if candidates:
+            cameras.extend(candidates)
+            known_hosts.add(host.lower())
     labels = {str(item["host"]).lower(): item.get("label", "") for item in records}
     rois = {str(item["host"]).lower(): item.get("roi") for item in records if item.get("roi")}
     for camera in cameras:
@@ -1023,13 +1163,7 @@ def create_app() -> FastAPI:
         user = require_user(request)
         settings = Settings.from_env()
         cameras = _camera_payload(settings, user)
-        database = "missing"
-        if settings.database_url:
-            try:
-                DatabaseRepository(settings.database_url).ping()
-                database = "ok"
-            except Exception as error:
-                database = f"error: {error}"
+        database = _database_health(settings)
         worker = _filter_worker_snapshot(_worker().snapshot(), settings, user)
         gpu = worker.get("gpu") or {}
         return {
@@ -1322,7 +1456,22 @@ def create_app() -> FastAPI:
         user = require_user(request)
         if not has_permission(user, "scan.camera"):
             raise HTTPException(status_code=403, detail="บัญชีนี้ไม่มีสิทธิ์ปิดการสแกนกล้องทั้งหมด")
-        await run_in_threadpool(_worker().stop_all)
+        settings = Settings.from_env()
+        permissions = _camera_permissions(settings, user)
+        if permissions is None:
+            await run_in_threadpool(_worker().stop_all)
+        else:
+            visible_hosts = [
+                str(item.get("host") or "")
+                for item in (_worker().snapshot().get("cameras") or [])
+                if permissions.get(str(item.get("host") or "").lower(), {}).get("can_view", False)
+            ]
+
+            def stop_visible() -> None:
+                for host in visible_hosts:
+                    _worker().stop_camera(host)
+
+            await run_in_threadpool(stop_visible)
         return {"ok": True, "cameras": []}
 
     @app.get("/api/worker/cameras/{host}/plates/{plate_id}/crop")
@@ -1404,7 +1553,22 @@ def create_app() -> FastAPI:
             return await run_in_threadpool(_worker().stop_camera, target)
         if not has_permission(user, "scan.camera"):
             raise HTTPException(status_code=403, detail="บัญชีนี้ไม่มีสิทธิ์ปิดกล้องทั้งหมด")
-        await run_in_threadpool(_worker().stop_all)
+        settings = Settings.from_env()
+        permissions = _camera_permissions(settings, user)
+        if permissions is None:
+            await run_in_threadpool(_worker().stop_all)
+        else:
+            visible_hosts = [
+                str(item.get("host") or "")
+                for item in (_worker().snapshot().get("cameras") or [])
+                if permissions.get(str(item.get("host") or "").lower(), {}).get("can_view", False)
+            ]
+
+            def stop_visible() -> None:
+                for visible_host in visible_hosts:
+                    _worker().stop_camera(visible_host)
+
+            await run_in_threadpool(stop_visible)
         return {"ok": True, "opened": False}
 
     @app.get("/api/cameras/live/snapshot.jpg")
@@ -1689,15 +1853,15 @@ def create_app() -> FastAPI:
         return _public_saved_scan(settings, row)
 
     @app.get("/api/scans/{scan_id}/plates/{plate_id}/vehicle")
-    def get_plate_vehicle(scan_id: int, plate_id: int, request: Request) -> FileResponse:
+    def get_plate_vehicle(scan_id: int, plate_id: int, request: Request) -> Response:
         return _serve_plate_image(request, scan_id, plate_id, "vehicle")
 
     @app.get("/api/scans/{scan_id}/plates/{plate_id}/crop")
-    def get_plate_crop(scan_id: int, plate_id: int, request: Request) -> FileResponse:
+    def get_plate_crop(scan_id: int, plate_id: int, request: Request) -> Response:
         return _serve_plate_image(request, scan_id, plate_id, "crop")
 
     @app.get("/api/scans/{scan_id}/image")
-    def get_scan_image(scan_id: int, request: Request) -> FileResponse:
+    def get_scan_image(scan_id: int, request: Request) -> Response:
         require_user(request)
         settings = Settings.from_env()
         if not settings.database_url:
@@ -1706,10 +1870,10 @@ def create_app() -> FastAPI:
             row = _scan_repository(settings).get_scan(scan_id)
         except Exception as error:
             raise HTTPException(status_code=404, detail=f"ไม่พบภาพหลักฐาน: {error}") from error
-        path = _safe_scan_image(settings, (row or {}).get("annotated_image"))
-        if path is None:
+        raw = (row or {}).get("annotated_image")
+        if not _image_available(settings, raw):
             raise HTTPException(status_code=404, detail="ไม่มีภาพหลักฐานของรายการนี้")
-        return FileResponse(path, media_type=IMAGE_TYPES[path.suffix.lower()], filename=path.name)
+        return _image_response(settings, raw)
 
     @app.post("/api/jobs")
     async def create_job(request: Request) -> JSONResponse:
@@ -1830,7 +1994,7 @@ def create_app() -> FastAPI:
         path = job.files.get(file_id)
         if path is None or not path.is_file():
             raise HTTPException(status_code=404, detail="ไม่พบไฟล์ผลลัพธ์")
-        return FileResponse(path, filename=path.name)
+        return FileResponse(path, media_type=IMAGE_TYPES.get(path.suffix.lower()), filename=path.name)
 
     @app.get("/api/jobs/{job_id}/events")
     def job_events(job_id: str, request: Request) -> StreamingResponse:

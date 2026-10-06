@@ -4,6 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     image: car-scan-web:local
+    env_file:
+      - .env
     ports:
       - "${CAR_SCAN_WEB_PORT:-8000}:8000"
     environment:
@@ -13,32 +15,18 @@ services:
       CAR_SCAN_WEB_PORT: "8000"
       CAR_SCAN_WEB_MAX_UPLOAD_MB: "${CAR_SCAN_WEB_MAX_UPLOAD_MB:-4096}"
       CAR_SCAN_PIPELINE_CONFIG: /app/pipeline_config.yaml
-      CAR_SCAN_DATABASE_URL: postgresql://car_scan:${POSTGRES_PASSWORD:-change-me}@db:5432/car_scan
+      DATABASE_URL: "${DATABASE_URL:-${CAR_SCAN_DATABASE_URL:-}}"
+      CAR_SCAN_DATABASE_URL: "${DATABASE_URL:-${CAR_SCAN_DATABASE_URL:-}}"
       CAR_SCAN_ADMIN_USERNAME: "${CAR_SCAN_ADMIN_USERNAME:-admin}"
       CAR_SCAN_ADMIN_PASSWORD: "${CAR_SCAN_ADMIN_PASSWORD:-changeme}"
       CAR_SCAN_AUTH_SECRET: "${CAR_SCAN_AUTH_SECRET:-}"
+      STORAGE_SERVICE_BASE_URL: "${STORAGE_SERVICE_BASE_URL:-http://10.0.200.205:8080}"
+      STORAGE_SERVICE_PROJECT_CODE: "${STORAGE_SERVICE_PROJECT_CODE:-onevision}"
+      STORAGE_SERVICE_API_TOKEN: "${STORAGE_SERVICE_API_TOKEN:-}"
+      ONEVISION_REPORT_DATA_URL: "${ONEVISION_REPORT_DATA_URL:-http://10.0.200.205:3008/api/dataset/storage}"
     volumes:
       - ./scan/data:/app/scan/data
-    depends_on:
-      db:
-        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     shm_size: "1gb"
     restart: unless-stopped
-
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: car_scan
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-      POSTGRES_DB: car_scan
-    volumes:
-      - car_scan_postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U car_scan -d car_scan"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-    restart: unless-stopped
-
-volumes:
-  car_scan_postgres:

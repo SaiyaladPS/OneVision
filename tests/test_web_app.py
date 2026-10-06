@@ -453,7 +453,7 @@ class WebAppTests(unittest.TestCase):
         from types import SimpleNamespace
 
         from src.car_scan.config import Settings
-        from src.car_scan.worker import IDLE_LANE_INTERVAL, GpuHub
+        from src.car_scan.worker import GpuHub, inference_interval
 
         hub = GpuHub(
             Settings(
@@ -463,34 +463,38 @@ class WebAppTests(unittest.TestCase):
             )
         )
         now = time.monotonic()
-        hot = SimpleNamespace(hot=True, last_infer_at=now)
+        hot = SimpleNamespace(hot=True, last_infer_at=0.0)
         idle_recent = SimpleNamespace(hot=False, last_infer_at=now)
-        idle_stale = SimpleNamespace(hot=False, last_infer_at=now - IDLE_LANE_INTERVAL - 1.0)
+        idle_stale = SimpleNamespace(hot=False, last_infer_at=0.0)
         hub.lanes = {"hot": hot, "recent": idle_recent, "stale": idle_stale}
         for host in ("recent", "stale", "hot"):
             hub.submit(host, None, 1)
 
         batch = [host for host, _ in hub._next_batch()]
 
-        # The lane with an unconfirmed plate goes first, a stale idle lane
-        # keeps its heartbeat, and the recently inferred idle lane waits.
-        self.assertEqual(batch[0], "hot")
-        self.assertIn("stale", batch)
-        self.assertNotIn("recent", batch)
+        # Only the latest hot frame is selected. Other cameras keep their
+        # latest pending frame instead of being sent to the model in a burst.
+        self.assertEqual(batch, ["hot"])
+        self.assertEqual(set(hub.pending), {"recent", "stale"})
+
+        # Once the hot lane is no longer urgent, the oldest idle frame gets
+        # the next fair turn.
+        hot.hot = False
+        hot.last_infer_at = now
+        self.assertEqual([host for host, _ in hub._next_batch()], ["stale"])
         self.assertEqual(set(hub.pending), {"recent"})
 
-        # Without any hot lane every pending frame is drained as before.
-        hot.hot = False
-        hub.submit("hot", None, 2)
-        self.assertEqual(sorted(host for host, _ in hub._next_batch()), ["hot", "recent"])
-        self.assertEqual(hub.pending, {})
+        self.assertGreater(
+            inference_interval(3, hub.settings, hot=False),
+            inference_interval(1, hub.settings, hot=False),
+        )
 
     def test_hybrid_hub_keeps_hot_lanes_on_gpu_and_idle_on_cpu(self) -> None:
         import time
         from types import SimpleNamespace
 
         from src.car_scan.config import Settings
-        from src.car_scan.worker import IDLE_LANE_INTERVAL, GpuHub
+        from src.car_scan.worker import GpuHub
 
         hub = GpuHub(
             Settings(
@@ -503,8 +507,8 @@ class WebAppTests(unittest.TestCase):
         hub.plan = SimpleNamespace(hybrid_cpu_yolo=True)
         now = time.monotonic()
         hub.lanes = {
-            "hot": SimpleNamespace(hot=True, last_infer_at=now),
-            "idle": SimpleNamespace(hot=False, last_infer_at=now - IDLE_LANE_INTERVAL - 1.0),
+            "hot": SimpleNamespace(hot=True, last_infer_at=0.0),
+            "idle": SimpleNamespace(hot=False, last_infer_at=0.0),
         }
         hub.submit("hot", None, 1)
         hub.submit("idle", None, 2)
@@ -523,12 +527,13 @@ class WebAppTests(unittest.TestCase):
             preview_fps=10.0,
             preview_max_dimension=960,
         )
-        few_fps, few_dim, _ = preview_budget(1, settings)
-        wall_fps, wall_dim, _ = preview_budget(8, settings)
+        few_fps, few_dim, few_quality = preview_budget(1, settings)
+        wall_fps, wall_dim, wall_quality = preview_budget(8, settings)
         self.assertGreaterEqual(few_fps, wall_fps)
         self.assertLessEqual(wall_fps, 8.0)
-        self.assertLessEqual(wall_dim, 480)
+        self.assertLessEqual(wall_dim, 560)
         self.assertGreater(few_dim, wall_dim)
+        self.assertGreater(few_quality, wall_quality)
 
     def test_worker_compute_requires_login_and_can_switch_to_cpu(self) -> None:
         anonymous = self.client.post("/api/worker/compute", json={"mode": "cpu"})
@@ -589,6 +594,31 @@ class WebAppTests(unittest.TestCase):
         self._login()
         missing = self.client.get("/api/worker/cameras/192.168.100.50/plates/1/crop")
         self.assertEqual(missing.status_code, 404)
+
+    def test_worker_plate_crop_is_served_inline(self) -> None:
+        from unittest.mock import patch
+
+        from src.car_scan import web
+
+        image_path = Path(self._tmp.name) / "out" / "test-plate.webp"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(b"webp-image")
+
+        class FakeWorker:
+            def configure(self, settings: object) -> None:
+                del settings
+
+            def plate_image(self, host: str, plate_id: int, kind: str) -> str:
+                del host, plate_id, kind
+                return str(image_path)
+
+        self._login()
+        with patch.object(web, "_WORKER", FakeWorker()):
+            response = self.client.get("/api/worker/cameras/192.168.100.50/plates/1/crop")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/webp")
+        self.assertTrue(response.headers["content-disposition"].startswith("inline;"))
 
     def test_camera_job_requires_login(self) -> None:
         response = self.client.post("/api/jobs", data={"media_type": "camera"})

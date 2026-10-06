@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -18,9 +20,12 @@ from typing import Any
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
+LOGGER = logging.getLogger(__name__)
+
 COOKIE_NAME = "car_scan_session"
 SESSION_DAYS = 7
 PBKDF2_ROUNDS = 180_000
+AUTH_DB_RETRY_SECONDS = 5.0
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{3,32}$")
 ROLES = ("admin", "operator", "viewer", "superuser")
 ROLE_CATALOG = (
@@ -212,8 +217,15 @@ class AuthStore:
         database_url = Settings.from_env().database_url
         if database_url:
             prisma_store = PrismaAuthStore(database_url=database_url, secret=_auth_secret())
-            prisma_store.initialize()
-            return prisma_store
+            try:
+                prisma_store.initialize()
+                return prisma_store
+            except Exception as error:
+                LOGGER.warning(
+                    "PostgreSQL authentication unavailable; PostgreSQL remains the only auth source: %s",
+                    error,
+                )
+                return ResilientAuthStore(primary=prisma_store)
         fallback = cls(path=_auth_db_path(), secret=_auth_secret())
         fallback.initialize()
         return fallback
@@ -787,7 +799,59 @@ class PrismaAuthStore:
         self._client().execute_raw("DELETE FROM auth_sessions WHERE user_id = $1", int(user_id))
 
 
-AuthBackend = AuthStore | PrismaAuthStore
+class ResilientAuthStore:
+    """Retry the configured PostgreSQL auth source without a restart."""
+
+    def __init__(self, *, primary: PrismaAuthStore) -> None:
+        self.primary = primary
+        self._active: PrismaAuthStore | None = None
+        self._retry_until = time.monotonic() + AUTH_DB_RETRY_SECONDS
+        self._lock = threading.Lock()
+
+    def _restore_primary(self) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            if self._active is self.primary:
+                return True
+            if self._retry_until > now:
+                return False
+            self._retry_until = now + AUTH_DB_RETRY_SECONDS
+            try:
+                self.primary.initialize()
+            except Exception as error:
+                LOGGER.warning("PostgreSQL auth is still unavailable; retrying later: %s", error)
+                return False
+            self._active = self.primary
+            self._retry_until = 0.0
+            LOGGER.info("PostgreSQL auth connection restored")
+            return True
+
+    def _require_primary(self) -> PrismaAuthStore:
+        if not self._restore_primary():
+            raise HTTPException(
+                status_code=503,
+                detail="ฐานข้อมูล PostgreSQL ยังเชื่อมต่อไม่ได้ จึงยังตรวจสอบผู้ใช้นี้ไม่ได้",
+            )
+        return self.primary
+
+    def authenticate(self, username: str, password: str) -> dict[str, Any]:
+        return self._require_primary().authenticate(username, password)
+
+    def read_session(self, token: str | None) -> dict[str, Any] | None:
+        if not self._restore_primary():
+            return None
+        return self.primary.read_session(token)
+
+    def session_id(self, token: str | None) -> str | None:
+        if not self._restore_primary():
+            return None
+        return self.primary.session_id(token)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._require_primary(), name)
+
+
+AuthBackend = AuthStore | PrismaAuthStore | ResilientAuthStore
 
 
 def current_user(request: Request) -> dict[str, Any] | None:

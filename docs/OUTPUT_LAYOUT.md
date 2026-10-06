@@ -8,13 +8,15 @@ uploads, and live cameras.
 scan/data/YYYYMMDD/
   thai/                  # confirmed Thai plate evidence
   laos/                  # confirmed Lao plate evidence
-    <stem>-full_vehicle.jpg
-    <stem>-plate_crops.jpg
-    <stem>-ocr_ready.jpg
+    <stem>-full_vehicle.webp
+    <stem>-plate_crops.webp
   json/                  # result manifests and plate metadata
   log/                   # detection logs and annotated snapshots
   video/                 # annotated video uploads
 ```
+
+The `ocr_ready_image` field remains an API/database alias to the plate crop;
+no separate OCR image file is written.
 
 `<stem>` is `<camera>-<province>-<prefix>-<number>-<YYYYMMDD>-<sequence>`.
 

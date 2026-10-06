@@ -84,6 +84,7 @@ const STRINGS = {
     gpu_loading: "กำลังโหลดโมเดล",
     camera_idle: "ยังไม่เปิด",
     camera_starting: "กำลังเปิดกล้อง",
+    camera_starting_progress: "กำลังเปิดกล้อง {progress}%",
     camera_stopping: "กำลังปิดกล้อง",
     camera_enable: "ใช้กล้องนี้",
     camera_disable: "ปิดกล้องนี้",
@@ -323,6 +324,7 @@ const STRINGS = {
     gpu_loading: "ກຳລັງໂຫຼດໂມເດວ",
     camera_idle: "ຍັງບໍ່ເປີດ",
     camera_starting: "ກຳລັງເປີດກ້ອງ",
+    camera_starting_progress: "ກຳລັງເປີດກ້ອງ {progress}%",
     camera_stopping: "ກຳລັງປິດກ້ອງ",
     camera_enable: "ໃຊ້ກ້ອງນີ້",
     camera_disable: "ປິດກ້ອງນີ້",
@@ -562,6 +564,7 @@ const STRINGS = {
     gpu_loading: "Loading models",
     camera_idle: "Idle",
     camera_starting: "Opening camera",
+    camera_starting_progress: "Opening camera {progress}%",
     camera_stopping: "Closing camera",
     camera_enable: "Use this camera",
     camera_disable: "Turn off camera",
@@ -833,7 +836,7 @@ function applyPermissions() {
   const scanOf = { image: "scan.image", video: "scan.video", camera: "scan.camera" };
   document.querySelectorAll(".mode[data-mode]").forEach((button) => {
     const allowed = button.dataset.mode === "camera"
-      ? can("scan.camera") || state.cameraAccessAvailable
+      ? state.cameraAccessAvailable
       : can(scanOf[button.dataset.mode]);
     button.disabled = !allowed;
     button.classList.toggle("hidden", !allowed && !can("users.manage"));
@@ -1021,6 +1024,7 @@ function setMode(mode) {
     return;
   }
   state.mode = mode;
+  if (mode === "camera") loadHealth().catch(() => {});
   document.querySelector(".app")?.classList.toggle("is-camera-mode", mode === "camera");
   document.querySelectorAll(".mode").forEach((button) => {
     button.setAttribute("aria-pressed", String(button.dataset.mode === mode));
@@ -1306,9 +1310,9 @@ function drawCameraRoi(host) {
   }
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const g = cameraFrameBox(canvas, img);
   const roi = roiFor(host);
   if (!roi.enabled) return;
-  const g = cameraFrameBox(canvas, img);
   const rx = g.x + roi.x * g.w;
   const ry = g.y + roi.y * g.h;
   const rw = roi.width * g.w;
@@ -1782,10 +1786,12 @@ function setCameraTransition(host, phase) {
 
 function cameraLiveLabel(live, host = "") {
   const transition = cameraTransition(host);
-  if (transition === "opening") return t("camera_starting");
+  if (transition === "opening" || live?.starting) {
+    const progress = Math.max(0, Math.min(99, Number(live?.start_progress) || 10));
+    return t("camera_starting_progress", { progress });
+  }
   if (transition === "stopping") return t("camera_stopping");
   if (live?.error) return live.error;
-  if (live?.starting) return t("camera_starting");
   if (live?.scanning) return t("camera_scanning");
   if (live?.live) return t("camera_live");
   return t("camera_idle");
@@ -1985,7 +1991,8 @@ function bindCameraStream(tile, host, live) {
   const img = tile.querySelector("img");
   if (!img) return;
   const offpage = tile.classList.contains("is-offpage");
-  if (live?.live && !offpage) {
+  const reconnectingExistingStream = live?.starting && img.dataset.live === "1";
+  if ((live?.live || reconnectingExistingStream) && !offpage) {
     if (img.dataset.live !== "1") {
       img.dataset.live = "1";
       img.decoding = "async";
@@ -2113,7 +2120,7 @@ function renderCameraGrid() {
     tile.querySelector("[data-role=status]").textContent = live?.error
       ? live.error
       : live?.starting
-        ? t("camera_starting")
+        ? t("camera_starting_progress", { progress: Math.max(0, Math.min(99, Number(live.start_progress) || 10)) })
       : live?.scanning
         ? Number(live.sampled_frames) > 0
           ? live.last_detect_count
@@ -2807,7 +2814,10 @@ function openCameras() {
   $("camerasPanel").classList.remove("hidden");
   startWorkerEvents();
   $("camerasBtn").setAttribute("aria-pressed", "true");
-  renderCameraSelect();
+  loadHealth().then(() => {
+    renderCameraSelect();
+    renderCameraGrid();
+  }).catch(() => {});
   refreshWorker().catch(() => {});
 }
 

@@ -1,3 +1,5 @@
+# PostgreSQL is provided by the external database server.
+# The container only runs the web application and Prisma client.
 FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -19,6 +21,7 @@ RUN apt-get update \
         libgl1 \
         libglib2.0-0 \
         libgomp1 \
+        libatomic1 \
         libsm6 \
         libxext6 \
         libxrender1 \

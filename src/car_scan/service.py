@@ -17,7 +17,8 @@ from typing import Any, Callable
 import cv2
 
 from .config import Settings, redact_stream_url
-from .database import jsonable_value
+from .database import LAOS_TIMEZONE, jsonable_value
+from .report_storage import enqueue_artifacts
 
 LOGGER = logging.getLogger(__name__)
 
@@ -737,7 +738,7 @@ class ScanService:
             f"media_type={media_type}",
             f"plate_count={int(result.get('plate_count', 0))}",
             f"rejected_plate_count={int(result.get('rejected_plate_count', 0))}",
-            f"created_at={datetime.now().isoformat(timespec='seconds')}",
+            f"created_at={datetime.now(LAOS_TIMEZONE).isoformat(timespec='seconds')}",
         ]
         for plate in result.get("plates", []):
             if not isinstance(plate, dict):
@@ -756,6 +757,19 @@ class ScanService:
         }
         result["result_json"] = str(result_path)
         result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        artifact_paths: list[str | Path | None] = [
+            result_path,
+            log_path,
+            result.get("annotated_image"),
+            result.get("output_video"),
+        ]
+        for plate in result.get("plates", []):
+            if isinstance(plate, dict):
+                artifact_paths.extend(
+                    plate.get(key)
+                    for key in ("full_vehicle_image", "crop_image", "ocr_ready_image", "plate_json")
+                )
+        enqueue_artifacts(self.settings.output_dir, *artifact_paths)
         return result
 
     def scan_file(self, image_path: Path) -> dict[str, Any]:
@@ -812,7 +826,7 @@ class ScanService:
             plate["id"] = index
 
         scan_output_dir = self._dated_output_dir()
-        annotated_path = scan_output_dir / "log" / f"{image_path.stem}_annotated.jpg"
+        annotated_path = scan_output_dir / "log" / f"{image_path.stem}_annotated.webp"
         write_image(annotated_path, annotated)
         if self.settings.debug_enabled:
             self._write_image_debug_artifacts(
@@ -979,7 +993,7 @@ class ScanService:
             min_confirmations=self.settings.video_min_confirmations,
             dedupe_frame_gap=max(60, int(round(source_fps * 10.0))),
         )
-        annotated_image = scan_output_dir / "log" / f"{video_path.stem}_annotated.jpg"
+        annotated_image = scan_output_dir / "log" / f"{video_path.stem}_annotated.webp"
         if last_annotated_frame is not None:
             write_image(annotated_image, last_annotated_frame)
         result = {
@@ -1064,7 +1078,7 @@ class ScanService:
             scan_roi_override=self.settings.scan_roi_override,
         )
         scan_output_dir = self._dated_output_dir()
-        session_stem = f"camera_{'ip' if stream else camera_index}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        session_stem = f"camera_{'ip' if stream else camera_index}_{datetime.now(LAOS_TIMEZONE).strftime('%Y%m%d_%H%M%S')}"
         session = self.new_live_session()
         frame_index = 0
         last_annotated_frame: Any = None
@@ -1190,7 +1204,7 @@ class ScanService:
             with camera_lock:
                 frame_index = max(frame_index, int(camera_state["frame_count"]))
 
-        snapshot_path = scan_output_dir / "log" / f"{session_stem}_annotated.jpg"
+        snapshot_path = scan_output_dir / "log" / f"{session_stem}_annotated.webp"
         if last_annotated_frame is not None:
             write_image(snapshot_path, last_annotated_frame)
         result = {
@@ -1869,7 +1883,7 @@ class ScanService:
             record["full_vehicle_image"] = str(full_path)
         else:
             scan_output_dir = self._dated_output_dir()
-            crop_path = scan_output_dir / f"{output_stem}_plate_{record_id}.jpg"
+            crop_path = scan_output_dir / f"{output_stem}_plate_{record_id}.webp"
             # Save the exact preprocessed crop consumed by OCR. Keep the
             # legacy ready-path field as an alias to this same file.
             ready_path = crop_path
@@ -1893,7 +1907,7 @@ class ScanService:
             return image.parent.parent / "json" / f"{stem}_plate.json"
         archive_name = str(record.get("archive_filename") or "").strip()
         if archive_name:
-            stem = Path(archive_name).name.removesuffix("-full_vehicle.jpg")
+            stem = Path(archive_name).stem.removesuffix("-full_vehicle")
             date_text = stem.split("-")[-2] if len(stem.split("-")) >= 2 else None
             return self._dated_output_dir(date_text) / "json" / f"{stem}_plate.json"
         raise ValueError("verified plate record has no archive image path")
@@ -1907,6 +1921,13 @@ class ScanService:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = jsonable_value(record)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        enqueue_artifacts(
+            self.settings.output_dir,
+            record.get("full_vehicle_image"),
+            record.get("crop_image"),
+            record.get("ocr_ready_image"),
+            path,
+        )
         return path
 
     def _refresh_plate_manifest(self, record: dict[str, Any]) -> None:
@@ -1924,7 +1945,7 @@ class ScanService:
     def _dated_output_dir(self, date_text: str | None = None) -> Path:
         """Return the output folder for one calendar day (``YYYYMMDD``)."""
 
-        date_text = date_text or datetime.now().strftime("%Y%m%d")
+        date_text = date_text or datetime.now(LAOS_TIMEZONE).strftime("%Y%m%d")
         output_dir = self.settings.output_dir / self._filename_part(date_text, "unknown_date")
         output_dir.mkdir(parents=True, exist_ok=True)
         for name in ("thai", "laos", "json", "log", "video"):
@@ -1953,15 +1974,25 @@ class ScanService:
         """Return the next three-digit sequence for this calendar day."""
 
         pattern = re.compile(
-            rf"-{re.escape(date_text)}-(\d{{3,}})-(?:rejected-)?full_vehicle\.jpg$",
+            rf"-{re.escape(date_text)}-(\d{{3,}})-(?:rejected-)?full_vehicle\.(?:jpe?g|webp)$",
             re.IGNORECASE,
         )
         highest = 0
-        for path in dated_output_dir.rglob("*-full_vehicle.jpg"):
+        for path in dated_output_dir.rglob("*-full_vehicle.*"):
             match = pattern.search(path.name)
             if match:
                 highest = max(highest, int(match.group(1)))
-        return highest + 1
+        counter_path = dated_output_dir / f".archive_sequence_{date_text}"
+        try:
+            highest = max(highest, int(counter_path.read_text(encoding="ascii").strip()))
+        except (OSError, ValueError):
+            pass
+        next_sequence = highest + 1
+        try:
+            counter_path.write_text(str(next_sequence), encoding="ascii")
+        except OSError:
+            LOGGER.warning("Could not persist archive sequence counter: %s", counter_path)
+        return next_sequence
 
     def _archive_stem(
         self,
@@ -2021,13 +2052,16 @@ class ScanService:
         """Persist an uncertain scan as a review-only REJECT training sample."""
 
         record = dict(plate)
-        date_text = datetime.now().strftime("%Y%m%d")
+        date_text = datetime.now(LAOS_TIMEZONE).strftime("%Y%m%d")
         country_dir = self._archive_directories(str(record.get("country") or ""), date_text)
         dated_output_dir = country_dir.parent
         sequence = self._next_archive_sequence(dated_output_dir, date_text)
         stem = self._archive_stem(record, archive_camera_id, date_text, sequence)
-        full_path = country_dir / f"{stem}-rejected-full_vehicle.jpg"
-        crop_path = country_dir / f"{stem}-rejected-plate_crops.jpg"
+        full_path = country_dir / f"{stem}-rejected-full_vehicle.webp"
+        crop_path = country_dir / f"{stem}-rejected-plate_crops.webp"
+        if hasattr(full_vehicle, "shape") and len(full_vehicle.shape) >= 2:
+            record["image_width"] = int(full_vehicle.shape[1])
+            record["image_height"] = int(full_vehicle.shape[0])
         # Keep rejected evidence to the same two images: full frame and the
         # preprocessed crop that would have been used by OCR.
         ready_path = crop_path
@@ -2044,9 +2078,11 @@ class ScanService:
                 "ocr_ready_image": str(ready_path),
             }
         )
-        (dated_output_dir / "json" / f"{stem}_rejected_plate.json").write_text(
+        rejected_json = dated_output_dir / "json" / f"{stem}_rejected_plate.json"
+        rejected_json.write_text(
             json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        enqueue_artifacts(self.settings.output_dir, full_path, crop_path, rejected_json)
         return record
 
     @staticmethod
@@ -2161,7 +2197,7 @@ class ScanService:
         label_dir = dataset_dir / "labels"
         image_dir.mkdir(parents=True, exist_ok=True)
         label_dir.mkdir(parents=True, exist_ok=True)
-        image_path = image_dir / f"{stem}.jpg"
+        image_path = image_dir / f"{stem}.webp"
         write_image(image_path, crop)
         (label_dir / f"{stem}.txt").write_text("\n".join(labels) + "\n", encoding="utf-8")
         if full_vehicle is not None:
@@ -2201,7 +2237,7 @@ class ScanService:
                     # Keep full-vehicle and plate-crop samples in the same
                     # YOLO split. The suffix prevents the two samples from
                     # colliding while preserving the shared archive name.
-                    full_image_path = image_dir / f"{stem}_full_vehicle.jpg"
+                    full_image_path = image_dir / f"{stem}_full_vehicle.webp"
                     full_label_path = label_dir / f"{stem}_full_vehicle.txt"
                     write_image(full_image_path, full_vehicle)
                     full_label_path.write_text(
@@ -2284,18 +2320,21 @@ class ScanService:
     ) -> tuple[Path, Path, Path, Path]:
         """Save a confirmed vehicle and its plate crop with one shared name."""
 
-        date_text = datetime.now().strftime("%Y%m%d")
+        date_text = datetime.now(LAOS_TIMEZONE).strftime("%Y%m%d")
         country = str(plate.get("country") or "")
         country_dir = self._archive_directories(country, date_text)
         dated_output_dir = country_dir.parent
         sequence = self._next_archive_sequence(dated_output_dir, date_text)
         stem = self._archive_stem(plate, archive_camera_id, date_text, sequence)
-        full_path = country_dir / f"{stem}-full_vehicle.jpg"
-        crop_path = country_dir / f"{stem}-plate_crops.jpg"
+        full_path = country_dir / f"{stem}-full_vehicle.webp"
+        crop_path = country_dir / f"{stem}-plate_crops.webp"
         # Save only the full frame and the exact preprocessed crop consumed by
         # OCR. ``ocr_ready_image`` points to the same crop for compatibility.
         ready_path = crop_path
         json_dir = dated_output_dir / "json"
+        if hasattr(full_vehicle, "shape") and len(full_vehicle.shape) >= 2:
+            plate["image_width"] = int(full_vehicle.shape[1])
+            plate["image_height"] = int(full_vehicle.shape[0])
         write_image(full_path, full_vehicle)
         write_image(ready_path, ready_crop)
         plate["archive_filename"] = full_path.name
@@ -2368,8 +2407,8 @@ class ScanService:
         }
         for folder in folders.values():
             folder.mkdir(parents=True, exist_ok=True)
-        write_image(folders["plates"] / f"{stem}_annotated.jpg", annotated)
-        write_image(folders["vehicles"] / f"{stem}_context.jpg", annotated)
+        write_image(folders["plates"] / f"{stem}_annotated.webp", annotated)
+        write_image(folders["vehicles"] / f"{stem}_context.webp", annotated)
 
         for state, items in (("accepted", plates), ("rejected", rejected_plates)):
             for index, plate in enumerate(items, start=1):
@@ -2388,12 +2427,12 @@ class ScanService:
                 )
                 ready = preprocess_plate_crop(image[oy1:oy2, ox1:ox2], parameters)
                 name = f"{stem}_{state}_{index}"
-                write_image(folders["crops"] / f"{name}.jpg", crop)
-                write_image(folders["preprocessing"] / f"{name}.jpg", ready)
+                write_image(folders["crops"] / f"{name}.webp", crop)
+                write_image(folders["preprocessing"] / f"{name}.webp", ready)
 
                 country = str(plate.get("country", "unknown"))
                 if country in ("thai", "lao"):
-                    write_image(folders[country] / f"{name}.jpg", crop)
+                    write_image(folders[country] / f"{name}.webp", crop)
                 vehicle = plate.get("vehicle", {})
                 vehicle_type = str(
                     vehicle.get("normalized_class", "unknown")
@@ -2401,9 +2440,9 @@ class ScanService:
                     else plate.get("vehicle_type", "unknown")
                 )
                 if vehicle_type in ("motorcycle", "car"):
-                    write_image(folders[vehicle_type] / f"{name}.jpg", crop)
+                    write_image(folders[vehicle_type] / f"{name}.webp", crop)
                 if state == "rejected":
-                    write_image(folders["rejected"] / f"{name}.jpg", crop)
+                    write_image(folders["rejected"] / f"{name}.webp", crop)
                 (folders["ocr"] / f"{name}.json").write_text(
                     json.dumps(
                         {

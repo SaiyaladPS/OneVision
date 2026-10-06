@@ -45,7 +45,7 @@ docker compose up --build
 
 เปิดเบราว์เซอร์ที่ [http://127.0.0.1:8000](http://127.0.0.1:8000)
 
-Compose จะสตาร์ทเว็บแอปกับ PostgreSQL คู่กัน แล้วใช้ Prisma Client Python จัดการตาราง `scan_runs`, `plates`, `users` ผลสแกนถูกเขียนไว้ที่ `scan/data` บนเครื่องคุณ ตั้งรหัสผ่านฐานข้อมูลด้วย `POSTGRES_PASSWORD` ใน `.env` (ค่าเริ่มต้น `change-me`)
+Compose จะสตาร์ทเฉพาะเว็บแอป และเชื่อมต่อ PostgreSQL ภายนอกผ่าน `DATABASE_URL` หรือ `CAR_SCAN_DATABASE_URL` ใน `.env` จากนั้น Prisma Client Python จะจัดการตาราง `scan_runs`, `plates`, `users` ผลสแกนถูกเขียนไว้ที่ `scan/data` บนเครื่องคุณ โดยไม่สร้าง PostgreSQL container เพิ่ม
 
 เมื่อรันจาก source หลัง `pip install` ให้ generate client แล้วดัน schema ครั้งแรก:
 

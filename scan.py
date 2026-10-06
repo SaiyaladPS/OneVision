@@ -3966,6 +3966,21 @@ class LicensePlateScanner:
         )
         self.last_roi_plate_detection_count = 0
         self.last_roi_waiting_detection_count = 0
+        self.last_plate_detections = []
+        if detections.boxes is not None:
+            self.last_plate_detections = [
+                {
+                    "box": [float(value) for value in xyxy],
+                    "confidence": float(confidence),
+                    "inside_roi": self._box_inside_scan_roi(
+                        [float(value) for value in xyxy], image
+                    ),
+                }
+                for xyxy, confidence in zip(
+                    detections.boxes.xyxy.cpu().tolist(),
+                    detections.boxes.conf.cpu().tolist(),
+                )
+            ]
         if detections.boxes is None or len(detections.boxes) == 0:
             self.last_vehicle_types = vehicle_types
             self._draw_vehicle_types(annotated, vehicle_types)
@@ -4350,7 +4365,7 @@ def main() -> None:
         )
     )
     scan_output_dir = archive_service._dated_output_dir()
-    annotated_path = scan_output_dir / "log" / f"{image_path.stem}_annotated.jpg"
+    annotated_path = scan_output_dir / "log" / f"{image_path.stem}_annotated.webp"
     write_image(annotated_path, annotated)
     for plate in plates:
         if not archive_service._has_complete_registration(plate):

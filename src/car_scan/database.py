@@ -12,7 +12,9 @@ from typing import Any
 
 from .realtime import publish_event
 
-BANGKOK = timezone(timedelta(hours=7))
+LAOS_TIMEZONE = timezone(timedelta(hours=7), "Asia/Vientiane")
+# Compatibility alias for existing report helpers and callers.
+BANGKOK = LAOS_TIMEZONE
 LOGGER = logging.getLogger(__name__)
 
 _SKIP_RECORD_KEYS = {

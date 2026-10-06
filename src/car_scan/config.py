@@ -518,16 +518,16 @@ class Settings:
     video_frame_stride: int = 1
     video_target_scans_per_second: float = 2.0
     video_min_confirmations: int = 3
-    camera_frame_stride: int = 2
-    # Require two live observations before publishing a CCTV plate. A single
-    # distant/blurred frame should not become the permanent live result.
+    camera_frame_stride: int = 1
+    # Two observations reduce false positives while still allowing plates
+    # from fast-moving vehicles to be confirmed before they leave the frame.
     camera_min_confirmations: int = 2
     camera_infer_max_dimension: int = 1920
     # A normal lane is sampled often enough to spot an approaching vehicle.
     # Once a plate is near/in the ROI it temporarily receives more frequent
     # inference so a fast-moving vehicle has several usable frames.
-    camera_idle_submit_interval: float = 0.18
-    camera_hot_submit_interval: float = 0.08
+    camera_idle_submit_interval: float = 0.08
+    camera_hot_submit_interval: float = 0.04
     temporal_min_quality: float = 0.58
     target_fps: float = 24.0
     # Preview delivery is deliberately independent from capture/inference.
@@ -563,7 +563,13 @@ class Settings:
         # Keep raw scan evidence separate from generated training exports.
         # The resulting layout is ``scan/data/YYYYMMDD/...``.
         output = _path(os.getenv("CAR_SCAN_OUTPUT_DIR"), root / "scan" / "data").resolve()
-        database_url = os.getenv("CAR_SCAN_DATABASE_URL", "").strip()
+        # Docker Compose and the deployment environment commonly expose
+        # DATABASE_URL. Keep the application-specific name as the preferred
+        # override, but accept the standard name for direct Windows runs too.
+        database_url = (
+            os.getenv("CAR_SCAN_DATABASE_URL", "").strip()
+            or os.getenv("DATABASE_URL", "").strip()
+        )
         from .compute import load_saved_compute_mode, normalise_compute_mode
 
         compute_mode = normalise_compute_mode(
@@ -587,7 +593,7 @@ class Settings:
             video_min_confirmations=max(
                 1, int(os.getenv("CAR_SCAN_VIDEO_MIN_CONFIRMATIONS", "3"))
             ),
-            camera_frame_stride=max(1, int(os.getenv("CAR_SCAN_CAMERA_FRAME_STRIDE", "2"))),
+            camera_frame_stride=max(1, int(os.getenv("CAR_SCAN_CAMERA_FRAME_STRIDE", "1"))),
             camera_min_confirmations=max(
                 1, int(os.getenv("CAR_SCAN_CAMERA_MIN_CONFIRMATIONS", "2"))
             ),
@@ -595,10 +601,10 @@ class Settings:
                 640, int(os.getenv("CAR_SCAN_CAMERA_INFER_MAX_DIMENSION", "1920"))
             ),
             camera_idle_submit_interval=max(
-                0.04, float(os.getenv("CAR_SCAN_CAMERA_IDLE_SUBMIT_INTERVAL", "0.18"))
+                0.04, float(os.getenv("CAR_SCAN_CAMERA_IDLE_SUBMIT_INTERVAL", "0.08"))
             ),
             camera_hot_submit_interval=max(
-                0.03, float(os.getenv("CAR_SCAN_CAMERA_HOT_SUBMIT_INTERVAL", "0.08"))
+                0.03, float(os.getenv("CAR_SCAN_CAMERA_HOT_SUBMIT_INTERVAL", "0.04"))
             ),
             temporal_min_quality=max(
                 0.0, float(os.getenv("CAR_SCAN_TEMPORAL_MIN_QUALITY", "0.58"))
