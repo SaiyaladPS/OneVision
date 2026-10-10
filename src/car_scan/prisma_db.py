@@ -72,7 +72,7 @@ def _prisma_env() -> dict[str, str]:
     env = os.environ.copy()
     scripts = str(Path(sys.executable).resolve().parent)
     env["PATH"] = scripts + os.pathsep + env.get("PATH", "")
-    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env["PYTHONIOENCODING"] = "utf-8:replace"
     return env
 
 
@@ -87,11 +87,15 @@ def push_schema(database_url: str) -> None:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=str(SCHEMA_PATH.parents[1]),
         env=_prisma_env(),
     )
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip() or f"exit {completed.returncode}"
+        if completed.returncode == 130 and not (completed.stderr or completed.stdout or "").strip():
+            detail = "คำสั่งถูกขัดจังหวะ (exit 130); ตรวจว่ามีการกด Ctrl+C หรือ process ถูกหยุดระหว่างเชื่อมต่อฐานข้อมูล"
         raise RuntimeError(f"prisma db push ไม่สำเร็จ: {detail}")
 
 

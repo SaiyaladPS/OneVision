@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 
 from src.car_scan.config import Settings
+from src.car_scan.database import LAOS_TIMEZONE, plate_create_data
 from src.car_scan.service import ScanService
 from src.car_scan.worker import _read_first_frame, same_live_registration
 
@@ -428,6 +429,84 @@ class TemporalScanningTests(unittest.TestCase):
         self.assertEqual(session.last_published[0]["plate_number"], "3197")
         self.assertEqual(len(session.pending_ocr), 1)
 
+    def test_camera_publishes_fast_read_and_defers_full_ocr_for_fast_vehicle(self) -> None:
+        plate = {
+            **self.plate(),
+            "detection_confidence": 0.97,
+            "recognition_confidence": 0.97,
+            "country_confidence_margin": 0.80,
+            # Live detector output has OCR deferred; the fast reading is shown
+            # immediately and full OCR refines it in the background.
+            "ocr": {"status": "deferred", "confidence": 0.0},
+        }
+
+        class Scanner:
+            last_plate_detection_count = 1
+            last_vehicle_types: list[dict] = []
+
+            @staticmethod
+            def draw_scan_roi(frame: np.ndarray) -> np.ndarray:
+                return frame.copy()
+
+            def scan(self, frame, *args, **kwargs):
+                self.last_plate_detection_count = 1
+                return [plate], frame.copy()
+
+        complete = {
+            **plate,
+            "id": 1,
+            "confirmed": True,
+            "validation": {"valid": True},
+            "ocr": {"confidence": 0.96},
+        }
+        session = self.service.new_live_session()
+        frame = np.zeros((60, 110, 3), dtype=np.uint8)
+        with (
+            patch.object(self.service, "_materialise_candidate", return_value=complete) as materialise,
+            patch.object(self.service, "_persist_candidate_files", return_value=complete),
+        ):
+            self.service.process_live_frame(
+                session,
+                Scanner(),
+                frame,
+                1,
+                write_image=lambda path, image: None,
+                preprocess_plate_crop=lambda crop, parameters=None: crop,
+                stride=2,
+                output_stem="camera_fast_vehicle",
+                archive_camera_id="1",
+                media="camera",
+                source_fps=25.0,
+            )
+
+        self.assertFalse(materialise.call_args.kwargs["run_full_ocr"])
+        self.assertEqual(len(session.confirmed_plates), 1)
+        self.assertEqual(len(session.last_published), 1)
+        self.assertEqual(len(session.pending_ocr), 1)
+
+    def test_promising_single_frame_candidate_does_not_require_deferred_ocr_score(self) -> None:
+        plate = {
+            **self.plate(),
+            "ocr": {"status": "deferred", "confidence": 0.0},
+        }
+
+        self.assertTrue(self.service._is_promising_single_frame(plate))
+        self.assertFalse(self.service._is_high_confidence_single_frame(plate))
+
+        conflicted = {
+            **plate,
+            "cross_model_digit_evidence": {"status": "conflict"},
+        }
+        self.assertFalse(self.service._is_promising_single_frame(conflicted))
+
+    def test_single_frame_fast_path_rejects_low_confidence_read(self) -> None:
+        plate = {
+            **self.plate(),
+            "detection_confidence": 0.70,
+            "recognition_confidence": 0.72,
+        }
+        self.assertFalse(self.service._is_high_confidence_single_frame(plate))
+
     def test_deferred_ocr_updates_thai_letter_prefix(self) -> None:
         record = {
             "country": "thai",
@@ -480,7 +559,7 @@ class TemporalScanningTests(unittest.TestCase):
         self.assertEqual(updated["province"], "กรุงเทพมหานคร")
         self.assertTrue(updated["confirmed"])
 
-    def test_live_frame_does_not_publish_incomplete_yolo_text(self) -> None:
+    def test_live_incomplete_fast_read_does_not_block_for_full_ocr(self) -> None:
         partial = {**self.plate(), "plate_prefix": "6", "plate_number": "319"}
 
         class Scanner:
@@ -497,7 +576,7 @@ class TemporalScanningTests(unittest.TestCase):
 
         session = self.service.new_live_session()
         frame = np.zeros((60, 110, 3), dtype=np.uint8)
-        with patch.object(self.service, "_materialise_candidate") as materialise:
+        with patch.object(self.service, "_materialise_candidate", return_value=None) as materialise:
             for frame_index in range(1, 6):
                 self.service.process_live_frame(
                     session,
@@ -512,10 +591,58 @@ class TemporalScanningTests(unittest.TestCase):
                     media="camera",
                     source_fps=15.0,
                 )
-            self.assertFalse(materialise.called)
+            self.assertTrue(materialise.called)
+            self.assertFalse(materialise.call_args.kwargs["run_full_ocr"])
         self.assertEqual(session.confirmed_plates, [])
         self.assertEqual(session.last_published, [])
         self.assertGreaterEqual(len(session.tracks), 1)
+
+    def test_live_incomplete_fast_read_is_published_when_full_ocr_completes_it(self) -> None:
+        partial = {**self.plate(), "plate_prefix": "6", "plate_number": "319"}
+
+        class Scanner:
+            last_plate_detection_count = 1
+            last_vehicle_types: list[dict] = []
+
+            @staticmethod
+            def draw_scan_roi(frame: np.ndarray) -> np.ndarray:
+                return frame.copy()
+
+            def scan(self, frame, *args, **kwargs):
+                self.last_plate_detection_count = 1
+                return [partial], frame.copy()
+
+        complete = {
+            **self.plate(),
+            "id": 1,
+            "confirmed": True,
+            "validation": {"valid": True},
+        }
+        session = self.service.new_live_session()
+        frame = np.zeros((60, 110, 3), dtype=np.uint8)
+        with (
+            patch.object(self.service, "_materialise_candidate", return_value=complete) as materialise,
+            patch.object(self.service, "_persist_candidate_files", return_value=complete),
+        ):
+            self.service.process_live_frame(
+                session,
+                Scanner(),
+                frame,
+                1,
+                write_image=lambda path, image: None,
+                preprocess_plate_crop=lambda crop, parameters=None: crop,
+                stride=2,
+                min_confirmations=1,
+                output_stem="camera_live",
+                archive_camera_id="1",
+                media="camera",
+                source_fps=15.0,
+            )
+
+        self.assertFalse(materialise.call_args.kwargs["run_full_ocr"])
+        self.assertEqual(len(session.confirmed_plates), 1)
+        self.assertEqual(len(session.last_published), 1)
+        self.assertEqual(len(session.pending_ocr), 1)
 
     def _live_scanner(self, readings: list[dict]) -> object:
         """A scanner double that returns one queued plate per sampled frame."""
@@ -823,6 +950,58 @@ class TemporalScanningTests(unittest.TestCase):
             sorted(path.name for path in full_path.parent.glob("*.webp")),
             sorted((full_path.name, crop_path.name)),
         )
+
+    def test_camera_archive_uses_camera_label_date_tree_and_new_name(self) -> None:
+        plate = {
+            "country": "thai",
+            "province": "กรุงเทพมหานคร",
+            "province_code": "BKK",
+            "plate_prefix": "76",
+            "plate_number": "4058",
+            "camera_label": "LED01",
+            "country_readings": {},
+        }
+
+        def fake_write(path: Path, unused_image: object) -> None:
+            del unused_image
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"image")
+
+        full_path, crop_path, ready_path, _ = self.service._save_archive_images(
+            plate,
+            "LED01",
+            np.zeros((20, 30, 3), dtype=np.uint8),
+            np.zeros((10, 20, 3), dtype=np.uint8),
+            np.zeros((10, 20, 3), dtype=np.uint8),
+            np.zeros((10, 20, 3), dtype=np.uint8),
+            object(),
+            fake_write,
+        )
+
+        date_text = datetime.now(LAOS_TIMEZONE).strftime("%Y%m%d")
+        self.assertEqual(
+            full_path.parent.relative_to(self.service.settings.output_dir).parts,
+            ("LED01", date_text[:4], date_text[4:6], date_text[6:8], "thai"),
+        )
+        stem = f"0001-LED01-BKK-76-4058-{date_text}"
+        self.assertEqual(full_path.name, f"{stem}-full_vehicle.webp")
+        self.assertEqual(crop_path.name, f"{stem}-plate_crops.webp")
+        self.assertEqual(ready_path, crop_path)
+        plate["full_vehicle_image"] = str(full_path)
+        plate["crop_image"] = str(crop_path)
+        db_record = plate_create_data(plate, self.service.settings.output_dir)
+        self.assertEqual(
+            db_record["vehicleImage"],
+            f"LED01/{date_text[:4]}/{date_text[4:6]}/{date_text[6:8]}/thai/{full_path.name}",
+        )
+        self.assertEqual(
+            db_record["cropImage"],
+            f"LED01/{date_text[:4]}/{date_text[4:6]}/{date_text[6:8]}/thai/{crop_path.name}",
+        )
+        self.assertEqual(db_record["rawPlate"]["camera_label"], "LED01")
+        self.assertTrue(Path(plate["plate_json"]).is_file())
+        self.assertEqual(self.service._camera_country_folder("lao"), "laos")
+        self.assertEqual(self.service._camera_country_folder("vietnamese"), "vietnam")
 
     def test_result_manifest_has_the_same_portable_contract_for_camera(self) -> None:
         manifest_path = Path(self.temporary.name) / "camera_result.json"

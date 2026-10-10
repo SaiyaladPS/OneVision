@@ -40,6 +40,90 @@ def box(text: str, confidence: float, x: float, y: float, width: float = 10, hei
 
 
 class StructuredPlatePipelineTests(unittest.TestCase):
+    def test_lane_roi_uses_polygon_and_preserves_trigger_line(self) -> None:
+        scanner = LicensePlateScanner.__new__(LicensePlateScanner)
+        scanner.scan_roi = LicensePlateScanner._normalise_scan_roi(
+            {
+                "enabled": True,
+                "shape": "lane",
+                "points": [
+                    {"x": 0.1, "y": 0.9},
+                    {"x": 0.45, "y": 0.4},
+                    {"x": 0.9, "y": 0.4},
+                    {"x": 0.75, "y": 0.9},
+                ],
+                "trigger_line": [{"x": 0.35, "y": 0.6}, {"x": 0.9, "y": 0.55}],
+            }
+        )
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+
+        self.assertTrue(scanner._box_inside_scan_roi([96, 60, 104, 68], frame))
+        self.assertFalse(scanner._box_inside_scan_roi([16, 16, 24, 24], frame))
+        self.assertEqual(len(scanner.scan_roi["trigger_line"]), 2)
+
+    def test_lane_camera_roi_waits_for_trigger_crossing_before_crop(self) -> None:
+        import scan
+
+        class Tensor:
+            def __init__(self, value):
+                self.value = value
+
+            def cpu(self):
+                return self
+
+            def tolist(self):
+                return self.value
+
+            def __len__(self):
+                return len(self.value)
+
+        class Boxes:
+            def __init__(self, box):
+                self.xyxy = Tensor([box])
+                self.conf = Tensor([0.95])
+                self.cls = Tensor([0.0])
+
+            def __len__(self):
+                return len(self.xyxy)
+
+        scanner = LicensePlateScanner.__new__(LicensePlateScanner)
+        scanner.scan_roi = LicensePlateScanner._normalise_scan_roi(
+            {
+                "enabled": True,
+                "shape": "lane",
+                "points": [[0.1, 0.9], [0.2, 0.1], [0.9, 0.1], [0.8, 0.9]],
+                "trigger_line": [[0.1, 0.5], [0.9, 0.5]],
+            }
+        )
+        scanner.pipeline_mode = "auto"
+        scanner.detector = SimpleNamespace(names={0: "license"})
+        scanner._draw_vehicle_types = lambda image, vehicles: None
+        tracker: list[dict] = []
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+
+        with patch.object(scan, "complete_detector_crop", return_value=(None, None, "invalid")) as crop, patch.object(
+            scan, "yolo_predict"
+        ) as predict:
+            predict.side_effect = lambda *args, **kwargs: [
+                SimpleNamespace(boxes=Boxes([90, 34 if context["frame_index"] == 1 else 54, 110, 46 if context["frame_index"] == 1 else 66]))
+            ]
+            context = {"tracks": tracker, "frame_index": 1, "max_gap_frames": 10}
+            scanner.scan(
+                frame, 0.3, 0.2, 0.03, 640, vehicle_types_override=[],
+                roi_trigger_context=context,
+            )
+            self.assertFalse(scanner.last_plate_detections[0]["scan_ready"])
+            crop.assert_not_called()
+
+            context["frame_index"] = 2
+            scanner.scan(
+                frame, 0.3, 0.2, 0.03, 640, vehicle_types_override=[],
+                roi_trigger_context=context,
+            )
+
+        self.assertTrue(scanner.last_plate_detections[0]["scan_ready"])
+        self.assertEqual(crop.call_count, 1)
+
     def test_cctv_detection_waits_for_roi_before_creating_a_crop(self) -> None:
         """An approaching plate is drawn, but crop/OCR starts only inside ROI."""
 
@@ -91,6 +175,68 @@ class StructuredPlatePipelineTests(unittest.TestCase):
         crop.assert_not_called()
         self.assertEqual(scanner.last_roi_waiting_detection_count, 1)
         self.assertEqual(tuple(annotated[20, 10]), (0, 165, 255))
+
+    def test_scan_ready_box_is_cropped_before_character_recognition(self) -> None:
+        """A scan-ready detector hit enters recognition with its crop immediately."""
+
+        import scan
+
+        class Tensor:
+            def __init__(self, value):
+                self.value = value
+
+            def cpu(self):
+                return self
+
+            def tolist(self):
+                return self.value
+
+            def __len__(self):
+                return len(self.value)
+
+        class Boxes:
+            xyxy = Tensor([[60.0, 35.0, 120.0, 65.0]])
+            conf = Tensor([0.96])
+            cls = Tensor([0.0])
+
+            def __len__(self):
+                return len(self.xyxy)
+
+        scanner = LicensePlateScanner.__new__(LicensePlateScanner)
+        scanner.scan_roi = scanner._normalise_scan_roi(
+            {"enabled": True, "shape": "rectangle", "x": 0, "y": 0, "width": 1, "height": 1}
+        )
+        scanner.pipeline_mode = "auto"
+        scanner.detector = SimpleNamespace(names={0: "license"})
+        scanner._draw_vehicle_types = lambda image, vehicles: None
+        frame = np.zeros((100, 180, 3), dtype=np.uint8)
+        crop = np.zeros((30, 60, 3), dtype=np.uint8)
+        events = []
+
+        def recognition_must_run_after_preview(*_args, **_kwargs):
+            events.append("recognition")
+            raise RuntimeError("stop after proving crop order")
+
+        scanner._classify_and_read_plate = recognition_must_run_after_preview
+        with (
+            patch.object(scan, "yolo_predict", return_value=[SimpleNamespace(boxes=Boxes())]),
+            patch.object(
+                scan,
+                "complete_detector_crop",
+                side_effect=lambda *_args: (events.append("crop") or crop, [58, 32, 122, 68], "full"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "crop order"),
+        ):
+            scanner.scan(
+                frame,
+                detector_confidence=0.35,
+                character_confidence=0.20,
+                padding=0.03,
+                imgsz=640,
+                vehicle_types_override=[],
+            )
+
+        self.assertEqual(events, ["crop", "recognition"])
 
     def test_country_models_do_not_run_without_a_detect_license_crop(self) -> None:
         class Model:

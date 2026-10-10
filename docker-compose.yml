@@ -23,7 +23,9 @@ services:
       STORAGE_SERVICE_BASE_URL: "${STORAGE_SERVICE_BASE_URL:-http://10.0.200.205:8080}"
       STORAGE_SERVICE_PROJECT_CODE: "${STORAGE_SERVICE_PROJECT_CODE:-onevision}"
       STORAGE_SERVICE_API_TOKEN: "${STORAGE_SERVICE_API_TOKEN:-}"
+      ONEVISION_REPORT_IMAGE_URL: "${ONEVISION_REPORT_IMAGE_URL:-http://10.0.200.205:3008/api/plates/image}"
       ONEVISION_REPORT_DATA_URL: "${ONEVISION_REPORT_DATA_URL:-http://10.0.200.205:3008/api/dataset/storage}"
+      CAR_SCAN_TRAIN_WORKERS: "${CAR_SCAN_TRAIN_WORKERS:-[]}"
     volumes:
       - ./scan/data:/app/scan/data
     extra_hosts:

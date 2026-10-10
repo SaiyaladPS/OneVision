@@ -29,6 +29,7 @@ RUN apt-get update \
         tesseract-ocr-tha \
         tesseract-ocr-lao \
         nodejs \
+        openssh-client \
         openssl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -38,8 +39,9 @@ COPY requirements-docker.txt /tmp/requirements-docker.txt
 RUN pip install --upgrade pip \
     && pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu \
     && pip install -r /tmp/requirements-docker.txt \
-    && (pip uninstall -y opencv-python || true) \
-    && pip install "opencv-python-headless>=4.10,<5"
+    && (pip uninstall -y opencv-python opencv-python-headless || true) \
+    && pip install --no-deps --force-reinstall "opencv-python-headless>=4.10,<5" \
+    && python -c "import cv2; assert callable(getattr(cv2, 'VideoCapture', None)), 'OpenCV VideoCapture is missing'; print('OpenCV VideoCapture ready:', cv2.__version__)"
 
 COPY prisma /app/prisma
 COPY . /app
@@ -57,6 +59,6 @@ RUN python -m prisma generate --schema /app/prisma/schema.prisma \
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"
+    CMD python -c "import socket; connection=socket.create_connection(('127.0.0.1', 8000), timeout=5); connection.close()"
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

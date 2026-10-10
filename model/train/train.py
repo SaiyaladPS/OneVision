@@ -79,7 +79,10 @@ def resume_candidates(target: TrainingTarget) -> list[ResumeCandidate]:
     """Find newest ``last.pt`` checkpoints and identify unfinished runs."""
 
     candidates: list[ResumeCandidate] = []
-    for checkpoint in target.training_dir.glob("**/weights/last.pt"):
+    runs_dir = target.training_dir / "runs"
+    if not runs_dir.is_dir():
+        return candidates
+    for checkpoint in runs_dir.glob("**/weights/last.pt"):
         run_dir = checkpoint.parent.parent
         args_file = run_dir / "args.yaml"
         target_epochs: int | None = None

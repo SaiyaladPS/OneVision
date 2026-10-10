@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import queue
 import threading
@@ -22,9 +23,8 @@ from .service import LiveScanSession, ScanService
 
 LOGGER = logging.getLogger(__name__)
 INFER_MAX_DIMENSION = 1920
-PREVIEW_FPS = 10.0
-PREVIEW_MAX_DIMENSION = 960
-PREVIEW_QUALITY = 70
+PREVIEW_FPS = 60.0
+PREVIEW_QUALITY = 100
 FIRST_FRAME_READ_ATTEMPTS = 4
 FIRST_FRAME_READ_DELAY_SECONDS = 0.20
 STOP_JOIN_TIMEOUT_SECONDS = 0.05
@@ -33,10 +33,12 @@ SHUTDOWN_JOIN_TIMEOUT_SECONDS = 1.5
 # lanes submit frames more often and are inferred first; idle lanes keep a
 # slower heartbeat so a passing car gets several samples instead of one or two.
 HOT_LANE_SECONDS = 4.0
-# Keep the live wall responsive when inference runs on CPU. These are lower
-# bounds for a *single* lane; the effective interval rises with camera count.
-MIN_IDLE_INFER_INTERVAL = 0.20
-MIN_HOT_INFER_INTERVAL = 0.10
+# Keep the live wall responsive when inference runs on CPU. Multi-camera
+# inference is still serialized, but linear per-lane throttling missed vehicles
+# that crossed the view between samples. Scale the interval sub-linearly.
+MIN_IDLE_INFER_INTERVAL = 0.12
+MIN_HOT_INFER_INTERVAL = 0.06
+MULTI_CAMERA_INFER_SCALE = 1.0
 CAMERA_READ_FAILURE_LIMIT = 8
 CAMERA_READ_FAILURE_MIN_SECONDS = 2.0
 CAMERA_RECONNECT_BASE_DELAY_SECONDS = 1.0
@@ -157,8 +159,8 @@ def _shrink(frame: Any, max_dimension: int = INFER_MAX_DIMENSION) -> Any:
     )
 
 
-def _encode_jpeg(frame: Any, max_dimension: int = 640, quality: int = 70) -> bytes | None:
-    image = _shrink(frame, max_dimension)
+def _encode_jpeg(frame: Any, max_dimension: int | None = 640, quality: int = 70) -> bytes | None:
+    image = frame if max_dimension is None else _shrink(frame, max_dimension)
     ok, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     if not ok:
         return None
@@ -189,8 +191,11 @@ def _draw_detector_boxes(frame: Any, boxes: list[dict[str, Any]]) -> Any:
             continue
         kind = str(box.get("kind") or "plate")
         if kind == "plate":
-            color = (60, 45, 255) if box.get("inside_roi", True) else (0, 145, 255)
-            label = f"PLATE DETECT {confidence:.0%}"
+            inside_roi = bool(box.get("inside_roi", True))
+            scan_ready = bool(box.get("scan_ready", inside_roi))
+            color = (60, 45, 255) if scan_ready else (0, 145, 255)
+            status = "SCANNING" if scan_ready else "WAIT TRIGGER" if inside_roi else "WAIT ROI"
+            label = f"PLATE {confidence:.0%} {status}"
         else:
             color = (0, 210, 255)
             label = f"{str(box.get('label') or 'VEHICLE')} {confidence:.0%}"
@@ -221,32 +226,34 @@ def _draw_detector_boxes(frame: Any, boxes: list[dict[str, Any]]) -> Any:
     return annotated
 
 
-def preview_budget(camera_count: int, settings: Settings | None = None) -> tuple[float, int, int]:
-    """Return preview FPS, max edge, and JPEG quality for the live wall.
+def preview_budget(
+    camera_count: int,
+    settings: Settings | None = None,
+    source_fps: float | None = None,
+) -> tuple[float, int | None, int]:
+    """Return source-rate, native-resolution and maximum-quality preview settings.
 
-    Keep single/few-camera previews sharp and smooth, then lower the cost per
-    lane as more simultaneous streams are opened.
+    ``camera_count`` stays in the signature for compatibility, but opening
+    additional cameras no longer lowers any camera's preview quality.
     """
 
-    count = max(1, int(camera_count or 1))
     fps = float(getattr(settings, "preview_fps", PREVIEW_FPS) or PREVIEW_FPS)
-    dim = int(getattr(settings, "preview_max_dimension", PREVIEW_MAX_DIMENSION) or PREVIEW_MAX_DIMENSION)
-    if count >= 7:
-        return max(5.0, min(fps, 6.0)), min(dim, 480), 55
-    if count >= 5:
-        return max(6.0, min(fps, 8.0)), min(dim, 560), 58
-    if count >= 3:
-        return max(7.0, min(fps, 8.0)), min(dim, 640), 62
-    return min(max(fps, 8.0), 12.0), min(dim, 800), 70
+    try:
+        camera_fps = float(source_fps or 0.0)
+    except (TypeError, ValueError):
+        camera_fps = 0.0
+    if 0.0 < camera_fps <= 120.0:
+        fps = min(fps, camera_fps)
+    return max(1.0, fps), None, 100
 
 
 def inference_interval(camera_count: int, settings: Settings, *, hot: bool) -> float:
     """Return the minimum interval before this lane may use the model again.
 
     Capture threads retain only the newest frame, so processing a queue of
-    older frames cannot improve recognition.  Scale the per-lane budget with
-    the number of active cameras instead: this prevents a CPU-only machine
-    from saturating, starving the JPEG preview, and appearing frozen.
+    older frames cannot improve recognition. Scale each lane sub-linearly with
+    camera count: linear throttling reduced four-camera idle sampling to below
+    one frame every 1.5 seconds, too slow for a passing vehicle.
     """
 
     count = max(1, int(camera_count or 1))
@@ -255,8 +262,9 @@ def inference_interval(camera_count: int, settings: Settings, *, hot: bool) -> f
         if hot
         else float(settings.camera_idle_submit_interval)
     )
-    floor = (MIN_HOT_INFER_INTERVAL if hot else MIN_IDLE_INFER_INTERVAL) * count
-    return max(floor, configured * count * 2.5)
+    scale = math.sqrt(count) * MULTI_CAMERA_INFER_SCALE
+    floor = (MIN_HOT_INFER_INTERVAL if hot else MIN_IDLE_INFER_INTERVAL) * math.sqrt(count)
+    return max(floor, configured * scale)
 
 
 def _set_ffmpeg_rtsp_options(transport: str) -> None:
@@ -383,6 +391,7 @@ class CameraLane:
     index: int
     settings: Settings
     hub: "GpuHub"
+    display_label: str = ""
     operator_id: int | None = None
     operator_name: str = ""
     operator_username: str = ""
@@ -415,6 +424,8 @@ class CameraLane:
     # Monotonic deadline while this lane is tracking a plate that has not
     # been confirmed yet; the hub and the capture loop sample it more often.
     hot_until: float = 0.0
+    # Bypass the normal per-lane throttle once after a plate enters the ROI.
+    urgent_infer: bool = False
     last_infer_at: float = 0.0
     session_finished: bool = False
 
@@ -445,7 +456,7 @@ class CameraLane:
 
     @property
     def label(self) -> str:
-        return camera_label(self.index, self.host)
+        return self.display_label.strip() or camera_label(self.index, self.host)
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -496,10 +507,7 @@ class CameraLane:
             if self.session_finished:
                 return
             self.session_finished = True
-        try:
-            self.persister.finish({"media_type": "camera", "plates": self.plates, "plate_count": len(self.plates)})
-        except Exception:
-            LOGGER.exception("finish live persist for %s", self.host)
+        self.hub.persist_queue.put((self, None))
 
     def stop_lane(self, *, timeout: float | None = None) -> None:
         self.stop.set()
@@ -625,13 +633,9 @@ class CameraLane:
                 accepted = True
             if not accepted:
                 continue
-            saved = None
-            try:
-                saved = self.persister.save_plate(record)
-            except Exception:
-                LOGGER.exception("persist plate from %s", self.host)
-            if saved is not None:
-                LOGGER.info("saved plate %s on %s", label, self.host)
+            # Update subscribers first; database/storage writes must not hold
+            # the shared camera inference lane or delay the first UI result.
+            self.hub.persist_queue.put((self, dict(record)))
             self.hub.notify_update("plate detected")
 
     def refresh_published_record(self, record: dict[str, Any]) -> None:
@@ -672,16 +676,13 @@ class CameraLane:
                 self.last_plate = label
         self.hub.service._refresh_plate_manifest(record)
         self.hub.notify_update("plate refined")
-        try:
-            self.persister.save_plate(record)
-        except Exception:
-            LOGGER.exception("persist refined OCR for %s", self.host)
+        self.hub.persist_queue.put((self, dict(record)))
 
     def snapshot_jpeg(self) -> bytes | None:
         with self.lock:
             frame = self.frame
             fallback = self.jpeg
-        return _encode_jpeg(frame, max_dimension=1600, quality=86) or fallback
+        return _encode_jpeg(frame, max_dimension=None, quality=100) or fallback
 
     def _connect_capture(self, attempt: int = 0) -> tuple[Any, str, Any] | None:
         """Keep retrying a failed camera connection until it recovers or stops."""
@@ -756,7 +757,7 @@ class CameraLane:
             self.hub.notify_update("camera state changed")
             return
         capture, opened_url, first_frame = connection
-        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0) or 15.0
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0) or 30.0
         if fps > 120.0:
             fps = 25.0
         self.fps = fps
@@ -772,7 +773,9 @@ class CameraLane:
         try:
             while not self.stop.is_set():
                 now = time.monotonic()
-                preview_fps, preview_dim, quality = preview_budget(self._lane_count(), self.settings)
+                preview_fps, preview_dim, quality = preview_budget(
+                    self._lane_count(), self.settings, self.fps
+                )
                 preview_gap = 1.0 / max(4.0, preview_fps)
                 with self.lock:
                     recording = self.recording
@@ -826,7 +829,7 @@ class CameraLane:
                         if connection is None:
                             break
                         capture, opened_url, pending = connection
-                        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0) or 15.0
+                        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0) or 30.0
                         if fps > 120.0:
                             fps = 25.0
                         self.fps = fps
@@ -860,14 +863,9 @@ class CameraLane:
                     self.frame_index += 1
                     index = self.frame_index
                     if keep_frame:
-                        # The full-resolution frame is not needed by the live
-                        # API (the JPEG preview is the normal response). Keep a
-                        # bounded copy so every 1080p camera does not retain a
-                        # second ~6 MiB array indefinitely.
-                        self.frame = _shrink(
-                            frame,
-                            max_dimension=max(640, int(self.settings.preview_max_dimension)),
-                        ).copy()
+                        # Preserve the native decoded frame for snapshots;
+                        # the live preview also encodes this size without resize.
+                        self.frame = frame.copy()
                     if preview:
                         self.jpeg = preview
                         self.seq += 1
@@ -938,6 +936,8 @@ class GpuHub:
         self.thread = threading.Thread(target=self._loop, daemon=True, name="gpu-hub")
         self.ocr_queue: queue.Queue[tuple[CameraLane, dict[str, Any], Any] | None] = queue.Queue()
         self.ocr_thread = threading.Thread(target=self._ocr_loop, daemon=True, name="gpu-ocr")
+        self.persist_queue: queue.Queue[tuple[CameraLane, dict[str, Any] | None]] = queue.Queue()
+        self.persist_thread = threading.Thread(target=self._persist_loop, daemon=True, name="gpu-persist")
         self.plan = resolve_compute(settings.compute_mode)
         self.cpu_service: ScanService | None = None
         self.cpu_lock = threading.Lock()
@@ -960,6 +960,9 @@ class GpuHub:
         if not self.ocr_thread.is_alive():
             self.ocr_thread = threading.Thread(target=self._ocr_loop, daemon=True, name="gpu-ocr")
             self.ocr_thread.start()
+        if not self.persist_thread.is_alive():
+            self.persist_thread = threading.Thread(target=self._persist_loop, daemon=True, name="gpu-persist")
+            self.persist_thread.start()
         if not self.cpu_thread.is_alive():
             self.cpu_thread = threading.Thread(target=self._cpu_loop, daemon=True, name="cpu-hub")
             self.cpu_thread.start()
@@ -971,7 +974,7 @@ class GpuHub:
         with self.pending_lock:
             self.pending.clear()
         deadline = time.monotonic() + max(0.0, timeout)
-        for thread in (self.thread, self.ocr_thread, self.cpu_thread):
+        for thread in (self.thread, self.ocr_thread, self.persist_thread, self.cpu_thread):
             if thread is threading.current_thread() or not thread.is_alive():
                 continue
             remaining = max(0.0, deadline - time.monotonic())
@@ -1089,6 +1092,7 @@ class GpuHub:
         now = time.monotonic()
         with self.pending_lock:
             hot: list[tuple[str, tuple[Any, int, Any]]] = []
+            urgent: list[tuple[str, tuple[Any, int, Any]]] = []
             idle: list[tuple[str, tuple[Any, int, Any]]] = []
             for host, item in list(self.pending.items()):
                 lane = self.lanes.get(host)
@@ -1106,15 +1110,20 @@ class GpuHub:
                 if role == "cpu" and is_hot:
                     continue
                 last_infer_at = float(getattr(lane, "last_infer_at", 0.0) or 0.0)
-                if now - last_infer_at < inference_interval(len(self.lanes), self.settings, hot=is_hot):
+                is_urgent = bool(getattr(lane, "urgent_infer", False))
+                if (
+                    not is_urgent
+                    and now - last_infer_at
+                    < inference_interval(len(self.lanes), self.settings, hot=is_hot)
+                ):
                     continue
-                (hot if is_hot else idle).append((host, item))
+                (urgent if is_urgent else hot if is_hot else idle).append((host, item))
 
             # Process one latest frame at a time. This is deliberate: a
             # single inference is the bottleneck, while a pending map already
             # coalesces each camera to its most recent frame. Picking the lane
             # least recently analysed gives every active camera a fair turn.
-            choices = hot or idle
+            choices = urgent or hot or idle
             if not choices:
                 return []
             host, item = min(
@@ -1124,6 +1133,8 @@ class GpuHub:
                 ),
             )
             self.pending.pop(host, None)
+            if getattr(self.lanes.get(host), "urgent_infer", False):
+                self.lanes[host].urgent_infer = False
             return [(host, item)]
 
     @staticmethod
@@ -1159,6 +1170,7 @@ class GpuHub:
             ):
                 continue
             try:
+                roi_plate_count = 0
                 with lock:
                     service.process_live_frame(
                         lane.session,
@@ -1170,8 +1182,9 @@ class GpuHub:
                         stride=max(1, int(self.settings.camera_frame_stride)),
                         min_confirmations=self.settings.camera_min_confirmations,
                         output_stem=lane.session_stem,
-                        archive_camera_id=str(lane.index),
+                        archive_camera_id=lane.label,
                         media="camera",
+                        camera_label=lane.label,
                         source_fps=float(lane.fps or 15.0),
                         persist_archive=True,
                         scan_roi=lane.roi,
@@ -1182,6 +1195,13 @@ class GpuHub:
                     ocr_jobs = list(lane.session.pending_ocr)
                     lane.session.pending_ocr = []
                     scanner = service._scanner
+                    # ``last_roi_waiting_detection_count`` is the number of
+                    # boxes still outside the ROI. Do not use it to boost
+                    # their inference priority; the inside counter below is
+                    # the trigger for fast-moving plates entering the zone.
+                    roi_plate_count = int(
+                        getattr(scanner, "last_roi_plate_detection_count", 0) or 0
+                    )
                     frame_height, frame_width = frame.shape[:2]
                     detector_boxes: list[dict[str, Any]] = []
                     for detection in getattr(scanner, "last_plate_detections", []):
@@ -1197,6 +1217,7 @@ class GpuHub:
                             "height": (y2 - y1) / frame_height,
                             "confidence": float(detection.get("confidence") or 0),
                             "inside_roi": bool(detection.get("inside_roi", True)),
+                            "scan_ready": bool(detection.get("scan_ready", detection.get("inside_roi", True))),
                         })
                     # Keep a visible fallback from the temporal tracker too.
                     # Some detector runtime builds expose the hit count and
@@ -1219,6 +1240,7 @@ class GpuHub:
                                 "height": (y2 - y1) / frame_height,
                                 "confidence": float((best_plate or {}).get("detection_confidence") or 0),
                                 "inside_roi": True,
+                                "scan_ready": True,
                             })
                     for detection in getattr(scanner, "last_vehicle_types", []):
                         box = detection.get("box") or []
@@ -1239,7 +1261,12 @@ class GpuHub:
                 lane.last_detect_count = lane.session.last_detect_count
                 lane.roi_waiting_count = lane.session.roi_waiting_count
                 lane.last_infer_at = time.monotonic()
-                if lane.roi_waiting_count > 0 or self._tracking_unconfirmed(lane, frame_index):
+                unconfirmed = self._tracking_unconfirmed(lane, frame_index)
+                if roi_plate_count > 0:
+                    # Prioritise the next newest frame immediately: fast
+                    # vehicles may leave the ROI before the normal interval.
+                    lane.urgent_infer = True
+                if roi_plate_count > 0 or unconfirmed:
                     lane.hot_until = lane.last_infer_at + HOT_LANE_SECONDS
                 if published:
                     lane.publish_records(published)
@@ -1313,6 +1340,30 @@ class GpuHub:
                 LOGGER.exception("deferred OCR failed for %s", lane.host)
             finally:
                 self.ocr_queue.task_done()
+
+    def _persist_loop(self) -> None:
+        """Persist detected/refined records without blocking live inference."""
+
+        while not self.stop.is_set() or not self.persist_queue.empty():
+            try:
+                lane, record = self.persist_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                if record is None:
+                    lane.persister.finish({
+                        "media_type": "camera",
+                        "plates": lane.plates,
+                        "plate_count": len(lane.plates),
+                    })
+                    continue
+                saved = lane.persister.save_plate(record)
+                if saved is not None:
+                    LOGGER.info("saved plate %s on %s", live_plate_label(record), lane.host)
+            except Exception:
+                LOGGER.exception("background persist failed for %s", lane.host)
+            finally:
+                self.persist_queue.task_done()
 
 
 class WorkerPool:
@@ -1433,6 +1484,7 @@ class WorkerPool:
         scan: bool = True,
         index: int | None = None,
         roi: dict[str, Any] | None = None,
+        display_label: str = "",
     ) -> dict[str, Any]:
         local = parse_local_camera(url) or parse_local_camera(host)
         if local is not None:
@@ -1450,6 +1502,8 @@ class WorkerPool:
             existing = self.hub.lanes.get(host)
             if existing and (existing.opened or existing.starting):
                 existing.scanning = scan
+                if display_label:
+                    existing.display_label = display_label
                 if chosen_roi is not None:
                     existing.roi = chosen_roi
                 return existing.snapshot()
@@ -1463,6 +1517,7 @@ class WorkerPool:
                 index=lane_index,
                 settings=self.settings,
                 hub=self.hub,
+                display_label=display_label,
                 operator_id=operator_id,
                 operator_name=operator_name,
                 operator_username=operator_username,
@@ -1491,6 +1546,7 @@ class WorkerPool:
         scan: bool = True,
         roi: dict[str, Any] | None = None,
         rois: dict[str, dict[str, Any]] | None = None,
+        camera_labels: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         errors: list[dict[str, str]] = []
         if roi is not None:
@@ -1507,6 +1563,11 @@ class WorkerPool:
                     scan=scan,
                     index=index,
                     roi=(rois or {}).get(host) or self.roi_by_host.get(host) or roi,
+                    display_label=next(
+                        (label for camera_host, label in (camera_labels or {}).items()
+                         if camera_host.lower() == host.lower()),
+                        "",
+                    ),
                 )
             except Exception as error:
                 errors.append({"host": host, "error": str(error)})

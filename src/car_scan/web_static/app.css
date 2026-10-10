@@ -258,6 +258,30 @@ body {
   padding: 5px 10px;
   font-size: 12px;
 }
+.camera-selector-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  margin: 8px 0;
+}
+.camera-selector-filters input,
+.camera-selector-filters select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+}
+.camera-selector-filters input:focus,
+.camera-selector-filters select:focus {
+  outline: 2px solid rgba(37, 99, 235, 0.25);
+  border-color: var(--enamel);
+}
 .camera-selector-list {
   display: grid;
   grid-template-columns: 1fr;
@@ -265,6 +289,10 @@ body {
   min-height: 0;
   overflow: auto;
   padding-right: 2px;
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
 }
 .camera-selector-item {
   display: grid;
@@ -272,6 +300,7 @@ body {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  min-height: 78px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -307,9 +336,43 @@ body {
 .camera-selector-copy strong {
   font-size: 13px;
 }
+.camera-selector-details {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  align-items: start;
+  gap: 5px;
+}
 .camera-selector-copy small {
+  min-width: 0;
   color: var(--muted);
   font-size: 11px;
+}
+.camera-direction-badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 6px;
+  border: 1px solid #CBD5E1;
+  border-radius: 999px;
+  background: #F1F5F9;
+  color: #475569;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.camera-direction-badge.direction-in {
+  border-color: #A7F3D0;
+  background: #ECFDF5;
+  color: #047857;
+}
+.camera-direction-badge.direction-out {
+  border-color: #BFDBFE;
+  background: #EFF6FF;
+  color: #1D4ED8;
 }
 .camera-selector-status {
   grid-column: 2;
@@ -486,6 +549,102 @@ body {
   padding: 4px 10px;
   font-size: 12px;
 }
+.camera-tile-actions {
+  display: flex;
+  gap: 6px;
+}
+.camera-tile-actions [data-action="focus"] {
+  min-width: 30px;
+  padding-inline: 7px;
+  font-size: 16px;
+  line-height: 1;
+}
+.camera-focus-btn {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.camera-grid.is-focus {
+  grid-template-columns: repeat(var(--wall-cols, 1), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--wall-rows, 1), minmax(0, 1fr));
+  padding: 8px;
+  gap: 8px;
+}
+.camera-focus-picker {
+  position: absolute;
+  z-index: 5;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 84px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.86);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+}
+.camera-focus-picker[hidden] {
+  display: none;
+}
+.camera-focus-choice {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  color: #CBD5E1;
+  border-color: #334155;
+  background: #0F172A;
+}
+.camera-focus-choice.is-active {
+  color: #fff;
+  border-color: #2563EB;
+  background: #1D4ED8;
+}
+.app.is-camera-focus > .rail,
+.app.is-camera-focus > .workspace > :not(.stage),
+.app.is-camera-focus .stage > :not(.preview-col),
+.app.is-camera-focus .preview-col > :not(.camera-workspace),
+.app.is-camera-focus #cameraSelector {
+  display: none !important;
+}
+.app.is-camera-focus > .workspace {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  min-height: 0;
+  background: #020617;
+}
+.app.is-camera-focus .stage {
+  display: block;
+  height: 100dvh;
+  padding: 0;
+  overflow: hidden;
+}
+.app.is-camera-focus .preview-col,
+.app.is-camera-focus .camera-workspace,
+.app.is-camera-focus .preview-panel {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+}
+.app.is-camera-focus .camera-workspace {
+  display: block;
+}
+.app.is-camera-focus .preview-panel {
+  padding: 12px;
+  border: 0;
+  border-radius: 0;
+}
+.app.is-camera-focus #dropZone {
+  flex: 1 1 auto;
+}
+.app.is-camera-focus .camera-tile {
+  border-radius: 0;
+}
 .camera-tile.is-live .camera-tile-index { color: #22C55E; }
 .camera-tile.is-error .camera-tile-index { color: #F59E0B; }
 .camera-tile.is-selected {
@@ -513,15 +672,53 @@ body {
 .app.is-camera-mode .well {
   min-height: 0;
 }
-.app.is-camera-mode .crop-panel {
-  flex: 0 0 auto;
-}
-.app.is-camera-mode .crops {
-  min-height: 88px;
-  max-height: 100px;
-}
 .app.is-camera-mode .result-table-panel {
-  min-height: 160px;
+  min-height: 300px;
+}
+
+/* On compact desktop windows the side-by-side result column starves the
+   camera wall (and leaves only one narrow stream per wall page). Stack the
+   results below the full-width camera workspace until the mobile layout takes
+   over at 980px. */
+@media (min-width: 981px) and (max-width: 1200px) {
+  .app.is-camera-mode {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+  }
+  .app.is-camera-mode > .workspace {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+  .app.is-camera-mode .stage {
+    grid-template-columns: minmax(0, 1fr);
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+  .app.is-camera-mode .preview-col,
+  .app.is-camera-mode .result-col {
+    overflow: visible;
+  }
+  .app.is-camera-mode .preview-col {
+    min-height: 680px;
+  }
+  .app.is-camera-mode .camera-workspace {
+    grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+    min-height: 430px;
+  }
+  .app.is-camera-mode .camera-selector {
+    max-height: 430px;
+  }
+  .app.is-camera-mode .preview-panel {
+    min-height: 430px;
+  }
+  .app.is-camera-mode #cameraGrid {
+    min-height: 360px;
+  }
+  .app.is-camera-mode .result-col {
+    min-height: 520px;
+  }
 }
 
 .stage {
@@ -576,9 +773,96 @@ body {
 .tip { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
 
 .preview-panel { flex: 1; min-height: 0; }
-.crop-panel { flex: 0 0 auto; }
 .detail-panel { flex: 0 1 auto; max-height: 112px; overflow: auto; }
-.result-table-panel { min-height: 240px; }
+.result-table-panel { min-height: 300px; }
+.ui-removed { display: none !important; }
+.result-crops {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 10px;
+}
+.result-crops .panel-head-row {
+  flex: 0 0 auto;
+  margin: 0 0 10px;
+  padding: 0 0 9px;
+  border-bottom: 1px solid #e5eaf1;
+  align-items: center;
+}
+.result-crops .panel-head { font-size: 14px; letter-spacing: -0.01em; }
+.result-crops .panel-meta {
+  padding: 3px 8px;
+  border: 1px solid #dbe5f3;
+  border-radius: 999px;
+  background: #f3f7fc;
+  color: #526783;
+  font-size: 11px;
+}
+.result-crops .crops {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(116px, 130px);
+  align-content: start;
+  gap: 9px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+  padding: 2px 3px 8px 1px;
+  scrollbar-width: thin;
+  scrollbar-color: #b8c7dc #f3f6fa;
+}
+.result-crops .crop-card {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  gap: 2px;
+  min-width: 0;
+  height: 100%;
+  padding: 7px;
+  border-radius: 11px;
+  text-align: left;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+.result-crops .crop-card:hover { transform: translateY(-1px); }
+.result-crops .crop-card:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+.result-crops .crop-card img,
+.result-crops .crop-placeholder {
+  height: 100%;
+  min-height: 0;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 7px;
+  background: #e9eef5;
+}
+.result-crops .crop-card img { border-radius: 7px; }
+.result-crops .crop-seq { top: 10px; left: 10px; }
+.result-crops .crop-card strong { margin: 1px 0 0; font-size: 12px; line-height: 1.2; }
+.result-crops .crop-meta { font-size: 10px; line-height: 1.25; }
+.result-crops .crop-card.thai {
+  border-color: #e6cc62;
+  background: linear-gradient(155deg, #fff8d9 0%, #fffdf5 70%);
+}
+.result-crops .crop-card.lao {
+  border-color: #8fc9a9;
+  background: linear-gradient(155deg, #eaf8ef 0%, #fbfefc 70%);
+}
+.result-crops .crops-empty {
+  grid-column: 1 / -1;
+  align-self: center;
+  justify-self: center;
+  text-align: center;
+}
+.result-crops .crop-card.active,
+.result-crops .crop-card.thai.active,
+.result-crops .crop-card.lao.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.14), 0 5px 14px rgba(37, 99, 235, 0.10);
+}
 .preview-col > .panel:last-child,
 .result-col > .panel:last-child { margin-bottom: 0; }
 .well {
@@ -1174,6 +1458,10 @@ tbody tr.empty-row td {
 }
 
 @media (max-width: 640px) {
+  .result-crops .crops { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(108px, 122px); gap: 7px; }
+  .result-crops .crop-card { padding: 6px; }
+  .result-crops .crop-card img { min-height: 48px; }
+  .result-crops .crop-seq { top: 9px; left: 9px; }
   .app.is-camera-mode .well,
   .app.is-camera-mode #cameraGrid { min-height: min(46vh, 360px); }
   .camera-workspace .camera-selector { max-height: 220px; }

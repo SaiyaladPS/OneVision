@@ -51,6 +51,7 @@ model Plate {
   vehicleImage          String? @map("vehicle_image")
   vehicleType           String? @map("vehicle_type")
   vehicleTypeConfidence Float?  @map("vehicle_type_confidence")
+  detectedAt            DateTime? @default(now()) @map("detected_at") @db.Timestamptz(6)
   scan                  ScanRun @relation(fields: [scanId], references: [id], onDelete: Cascade)
 
   @@index([plateNumber], map: "ix_plates_plate_number")
@@ -84,6 +85,7 @@ model Camera {
   createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   roiJson           String?        @map("roi_json")
+  direction         String         @default("UNASSIGNED")
   accessPermissions CameraAccess[]
 
   @@index([enabled], map: "ix_cameras_enabled")

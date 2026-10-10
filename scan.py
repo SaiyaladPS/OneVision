@@ -3061,8 +3061,8 @@ class LicensePlateScanner:
         shape = str(value.get("shape", "rectangle")).strip().lower()
         shape_aliases = {"rect": "rectangle", "box": "rectangle", "oval": "ellipse"}
         shape = shape_aliases.get(shape, shape)
-        if shape not in ("rectangle", "circle", "ellipse"):
-            raise ValueError("scan_roi.shape must be rectangle, circle, or ellipse")
+        if shape not in ("rectangle", "circle", "ellipse", "lane"):
+            raise ValueError("scan_roi.shape must be rectangle, circle, ellipse, or lane")
         unit = str(value.get("unit", "normalized")).strip().lower()
         if unit in ("normalised", "ratio", "relative"):
             unit = "normalized"
@@ -3084,6 +3084,63 @@ class LicensePlateScanner:
         elif width <= 0 or height <= 0 or x < 0 or y < 0:
             raise ValueError("pixel scan_roi x/y must be non-negative and width/height must be positive")
 
+        points: list[tuple[float, float]] = []
+        trigger_line: list[tuple[float, float]] = []
+        if shape == "lane":
+            if unit != "normalized":
+                raise ValueError("lane ROI points require normalized coordinates")
+            raw_points = value.get("points")
+            if not isinstance(raw_points, (list, tuple)) or len(raw_points) < 3:
+                # A useful trapezoid when upgrading a saved rectangular ROI.
+                raw_points = [
+                    (x, y + height),
+                    (x + width * 0.42, y),
+                    (x + width, y),
+                    (x + width * 0.78, y + height),
+                ]
+            for point in raw_points:
+                try:
+                    px, py = (
+                        (point.get("x"), point.get("y"))
+                        if isinstance(point, dict)
+                        else (point[0], point[1])
+                    )
+                    px, py = float(px), float(py)
+                except (TypeError, ValueError, IndexError, KeyError) as error:
+                    raise ValueError("lane ROI points must contain normalized x/y pairs") from error
+                if not (0.0 <= px <= 1.0 and 0.0 <= py <= 1.0):
+                    raise ValueError("lane ROI points must stay inside the normalized image")
+                points.append((px, py))
+            if len(points) < 3:
+                raise ValueError("lane ROI needs at least three polygon points")
+            raw_trigger = value.get("trigger_line")
+            if not isinstance(raw_trigger, (list, tuple)) or len(raw_trigger) != 2:
+                min_x = min(point[0] for point in points)
+                max_x = max(point[0] for point in points)
+                min_y = min(point[1] for point in points)
+                max_y = max(point[1] for point in points)
+                raw_trigger = [(min_x, (min_y + max_y) / 2), (max_x, (min_y + max_y) / 2)]
+            for point in raw_trigger:
+                try:
+                    px, py = (
+                        (point.get("x"), point.get("y"))
+                        if isinstance(point, dict)
+                        else (point[0], point[1])
+                    )
+                    px, py = float(px), float(py)
+                except (TypeError, ValueError, IndexError, KeyError) as error:
+                    raise ValueError("lane ROI trigger_line must contain two normalized points") from error
+                if not (0.0 <= px <= 1.0 and 0.0 <= py <= 1.0):
+                    raise ValueError("lane ROI trigger line must stay inside the normalized image")
+                trigger_line.append((px, py))
+            min_x = min(point[0] for point in points)
+            max_x = max(point[0] for point in points)
+            min_y = min(point[1] for point in points)
+            max_y = max(point[1] for point in points)
+            x, y, width, height = min_x, min_y, max_x - min_x, max_y - min_y
+            if width <= 0.0 or height <= 0.0:
+                raise ValueError("lane ROI polygon must have non-zero width and height")
+
         colour = value.get("color", "#ff0000")
         if isinstance(colour, (list, tuple)) and len(colour) == 3:
             bgr = tuple(max(0, min(255, int(channel))) for channel in colour)
@@ -3101,7 +3158,7 @@ class LicensePlateScanner:
             except ValueError as error:
                 raise ValueError("scan_roi.color must be #RRGGBB") from error
         thickness = max(1, int(value.get("thickness", 3)))
-        return {
+        normalized = {
             "enabled": True,
             "shape": shape,
             "unit": unit,
@@ -3112,6 +3169,10 @@ class LicensePlateScanner:
             "color": bgr,
             "thickness": thickness,
         }
+        if shape == "lane":
+            normalized["points"] = points
+            normalized["trigger_line"] = trigger_line
+        return normalized
 
     def _scan_roi_bounds(self, image: np.ndarray) -> tuple[int, int, int, int] | None:
         roi = getattr(self, "scan_roi", None)
@@ -3145,6 +3206,17 @@ class LicensePlateScanner:
         centre_y = (y1 + y2) / 2.0
         left, top, right, bottom = bounds
         roi = self.scan_roi
+        if roi["shape"] == "lane":
+            points = np.asarray(
+                [
+                    [round(px * image.shape[1]), round(py * image.shape[0])]
+                    for px, py in roi["points"]
+                ],
+                dtype=np.int32,
+            )
+            return cv2.pointPolygonTest(
+                points.reshape((-1, 1, 2)), (float(centre_x), float(centre_y)), False
+            ) >= 0
         if roi["shape"] == "rectangle":
             return left <= centre_x <= right and top <= centre_y <= bottom
         radius_x = max(1.0, (right - left) / 2.0)
@@ -3155,6 +3227,126 @@ class LicensePlateScanner:
         normal_x = (centre_x - (left + right) / 2.0) / radius_x
         normal_y = (centre_y - (top + bottom) / 2.0) / radius_y
         return normal_x * normal_x + normal_y * normal_y <= 1.0
+
+    def _lane_trigger_status(
+        self,
+        boxes: list[list[float]],
+        image: np.ndarray,
+        context: dict[str, Any],
+    ) -> list[bool]:
+        """Track plate centres and latch a camera plate after it crosses the lane trigger."""
+
+        roi = self.scan_roi
+        if not roi or roi.get("shape") != "lane":
+            return [True] * len(boxes)
+        height, width = image.shape[:2]
+        line = roi["trigger_line"]
+        line_start = np.asarray([line[0][0] * width, line[0][1] * height], dtype=np.float64)
+        line_end = np.asarray([line[1][0] * width, line[1][1] * height], dtype=np.float64)
+        line_vector = line_end - line_start
+        line_length = float(np.linalg.norm(line_vector))
+        if line_length < 1.0:
+            return [False] * len(boxes)
+
+        frame_index = int(context.get("frame_index", 0))
+        max_gap = max(1, int(context.get("max_gap_frames", 30)))
+        tracks = context.get("tracks")
+        if not isinstance(tracks, list):
+            tracks = []
+            context["tracks"] = tracks
+        tracks[:] = [
+            track for track in tracks
+            if frame_index - int(track.get("last_frame", -1)) <= max_gap
+        ]
+        unmatched = set(range(len(tracks)))
+        statuses: list[bool] = []
+        polygon = np.asarray(
+            [[round(px * width), round(py * height)] for px, py in roi["points"]],
+            dtype=np.int32,
+        ).reshape((-1, 1, 2))
+
+        def signed_distance(point: np.ndarray) -> float:
+            return float(line_vector[0] * (point[1] - line_start[1]) - line_vector[1] * (point[0] - line_start[0])) / line_length
+
+        def segment_crosses(previous: np.ndarray, current: np.ndarray) -> bool:
+            movement = current - previous
+            denominator = float(movement[0] * line_vector[1] - movement[1] * line_vector[0])
+            if abs(denominator) < 1e-6:
+                return False
+            offset = line_start - previous
+            along_movement = float(offset[0] * line_vector[1] - offset[1] * line_vector[0]) / denominator
+            along_line = float(offset[0] * movement[1] - offset[1] * movement[0]) / denominator
+            if not (-1e-4 <= along_movement <= 1.0001 and -1e-4 <= along_line <= 1.0001):
+                return False
+            intersection = previous + along_movement * movement
+            return cv2.pointPolygonTest(
+                polygon, (float(intersection[0]), float(intersection[1])), False
+            ) >= 0
+
+        for box in boxes:
+            x1, y1, x2, y2 = (float(value) for value in box)
+            centre = np.asarray([(x1 + x2) / 2.0, (y1 + y2) / 2.0], dtype=np.float64)
+            side_distance = signed_distance(centre)
+            side = 0 if abs(side_distance) <= 1.0 else (1 if side_distance > 0 else -1)
+            box_width, box_height = max(1.0, x2 - x1), max(1.0, y2 - y1)
+            match_index = None
+            match_score = float("inf")
+            for index in unmatched:
+                track = tracks[index]
+                previous_centre = np.asarray(track["center"], dtype=np.float64)
+                previous_box = track["box"]
+                distance = float(np.linalg.norm(centre - previous_centre))
+                previous_size = max(float(previous_box[2] - previous_box[0]), float(previous_box[3] - previous_box[1]))
+                current_size = max(box_width, box_height)
+                frame_gap = max(1, frame_index - int(track.get("last_frame", frame_index)))
+                frame_diagonal = float(np.hypot(width, height))
+                motion_limit = min(
+                    frame_diagonal * 0.35,
+                    max(48.0, frame_diagonal * 0.12 * frame_gap / 15.0),
+                )
+                max_distance = max(
+                    48.0,
+                    2.5 * max(previous_size, current_size),
+                    motion_limit,
+                )
+                if distance > max_distance:
+                    continue
+                score = distance / max_distance
+                if score < match_score:
+                    match_index, match_score = index, score
+
+            if match_index is None:
+                track = {
+                    "box": [x1, y1, x2, y2],
+                    "center": centre.tolist(),
+                    "last_nonzero_center": centre.tolist() if side else None,
+                    "side": side,
+                    "last_frame": frame_index,
+                    "trigger_passed": False,
+                }
+                tracks.append(track)
+            else:
+                unmatched.remove(match_index)
+                track = tracks[match_index]
+                previous_nonzero = track.get("last_nonzero_center")
+                previous_side = int(track.get("side", 0))
+                if (
+                    not track.get("trigger_passed")
+                    and side
+                    and previous_side
+                    and side != previous_side
+                    and previous_nonzero is not None
+                    and segment_crosses(np.asarray(previous_nonzero, dtype=np.float64), centre)
+                ):
+                    track["trigger_passed"] = True
+                if side:
+                    track["side"] = side
+                    track["last_nonzero_center"] = centre.tolist()
+                track["box"] = [x1, y1, x2, y2]
+                track["center"] = centre.tolist()
+                track["last_frame"] = frame_index
+            statuses.append(bool(track.get("trigger_passed")))
+        return statuses
 
     def draw_scan_roi(self, image: np.ndarray) -> np.ndarray:
         """Draw the configured scan region on a preview frame."""
@@ -3169,6 +3361,33 @@ class LicensePlateScanner:
         thickness = int(roi["thickness"])
         if roi["shape"] == "rectangle":
             cv2.rectangle(annotated, (left, top), (right, bottom), colour, thickness)
+        elif roi["shape"] == "lane":
+            points = np.asarray(
+                [
+                    [round(px * annotated.shape[1]), round(py * annotated.shape[0])]
+                    for px, py in roi["points"]
+                ],
+                dtype=np.int32,
+            )
+            cv2.polylines(annotated, [points.reshape((-1, 1, 2))], True, colour, thickness, cv2.LINE_AA)
+            trigger = np.asarray(
+                [
+                    [round(px * annotated.shape[1]), round(py * annotated.shape[0])]
+                    for px, py in roi["trigger_line"]
+                ],
+                dtype=np.int32,
+            )
+            cv2.line(annotated, tuple(trigger[0]), tuple(trigger[1]), (0, 255, 255), max(2, thickness), cv2.LINE_AA)
+            cv2.putText(
+                annotated,
+                "TRIGGER LINE",
+                tuple(trigger[0] + np.asarray([6, -8])),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 255),
+                max(1, min(2, thickness)),
+                cv2.LINE_AA,
+            )
         else:
             centre = ((left + right) // 2, (top + bottom) // 2)
             radius_x = max(1, (right - left) // 2)
@@ -3197,6 +3416,7 @@ class LicensePlateScanner:
         confidence: float,
         *,
         inside_roi: bool,
+        scan_ready: bool | None = None,
     ) -> None:
         """Show every CCTV plate hit, including plates waiting to enter the ROI.
 
@@ -3212,8 +3432,9 @@ class LicensePlateScanner:
         y1, y2 = max(0, min(height - 1, y1)), max(0, min(height - 1, y2))
         if x2 <= x1 or y2 <= y1:
             return
-        colour = (0, 190, 0) if inside_roi else (0, 165, 255)
-        status = "SCANNING" if inside_roi else "WAIT ROI"
+        scan_ready = inside_roi if scan_ready is None else scan_ready
+        colour = (0, 190, 0) if scan_ready else (0, 165, 255)
+        status = "SCANNING" if scan_ready else "WAIT TRIGGER" if inside_roi else "WAIT ROI"
         label = f"PLATE {float(confidence):.0%} {status}"
         cv2.rectangle(annotated, (x1, y1), (x2, y2), colour, 2)
         cv2.putText(
@@ -3938,6 +4159,7 @@ class LicensePlateScanner:
         plate_type_confidence: float = 0.25,
         fast_mode: bool = False,
         vehicle_types_override: list[dict[str, Any]] | None = None,
+        roi_trigger_context: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], np.ndarray]:
         annotated = self.draw_scan_roi(image)
         if vehicle_types_override is not None:
@@ -3966,6 +4188,7 @@ class LicensePlateScanner:
         )
         self.last_roi_plate_detection_count = 0
         self.last_roi_waiting_detection_count = 0
+        self.last_trigger_waiting_detection_count = 0
         self.last_plate_detections = []
         if detections.boxes is not None:
             self.last_plate_detections = [
@@ -3981,6 +4204,16 @@ class LicensePlateScanner:
                     detections.boxes.conf.cpu().tolist(),
                 )
             ]
+        trigger_context = roi_trigger_context if isinstance(roi_trigger_context, dict) else None
+        if self.scan_roi and self.scan_roi.get("shape") == "lane" and trigger_context is not None:
+            trigger_statuses = self._lane_trigger_status(
+                [item["box"] for item in self.last_plate_detections], image, trigger_context
+            )
+        else:
+            trigger_statuses = [True] * len(self.last_plate_detections)
+        for detection, trigger_passed in zip(self.last_plate_detections, trigger_statuses):
+            detection["trigger_passed"] = trigger_passed
+            detection["scan_ready"] = bool(detection["inside_roi"] and trigger_passed)
         if detections.boxes is None or len(detections.boxes) == 0:
             self.last_vehicle_types = vehicle_types
             self._draw_vehicle_types(annotated, vehicle_types)
@@ -4001,17 +4234,23 @@ class LicensePlateScanner:
             start=1,
         ):
             xyxy = [float(value) for value in xyxy]
-            inside_roi = self._box_inside_scan_roi(xyxy, image)
+            detection_status = self.last_plate_detections[index - 1]
+            inside_roi = bool(detection_status["inside_roi"])
+            scan_ready = bool(detection_status["scan_ready"])
             self._draw_plate_detection(
                 annotated,
                 xyxy,
                 float(confidence),
                 inside_roi=inside_roi,
+                scan_ready=scan_ready,
             )
             if not inside_roi:
                 self.last_roi_waiting_detection_count += 1
                 continue
             self.last_roi_plate_detection_count += 1
+            if not scan_ready:
+                self.last_trigger_waiting_detection_count = getattr(self, "last_trigger_waiting_detection_count", 0) + 1
+                continue
             # This is deliberately before complete_detector_crop: a box that
             # has not entered the ROI is preview-only and must never reach the
             # crop, recognition, or archive stages.

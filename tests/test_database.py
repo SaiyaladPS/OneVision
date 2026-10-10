@@ -49,6 +49,74 @@ class FakeArray:
         return self._values
 
 
+class CameraStorageTests(unittest.TestCase):
+    def test_camera_listing_returns_saved_direction(self) -> None:
+        from src.car_scan.database import DatabaseRepository
+
+        class Client:
+            def query_raw(self, query):
+                self.query = query
+                return [{
+                    "id": 4,
+                    "host": "10.0.75.117",
+                    "stream_url": "rtsp://10.0.75.117/stream",
+                    "label": "LE01",
+                    "kind": "ip",
+                    "device_index": None,
+                    "enabled": True,
+                    "roi_json": None,
+                    "direction": "IN",
+                    "created_at": None,
+                    "updated_at": None,
+                }]
+
+        client = Client()
+        repository = DatabaseRepository("postgresql://test")
+        repository._client = lambda: client
+        cameras = repository.list_cameras()
+
+        self.assertIn("direction", client.query)
+        self.assertEqual(cameras[0]["direction"], "IN")
+
+    def test_camera_storage_ensures_direction_column(self) -> None:
+        from src.car_scan.database import DatabaseRepository
+
+        class Client:
+            statements = []
+
+            def execute_raw(self, statement):
+                self.statements.append(statement)
+
+        client = Client()
+        repository = DatabaseRepository("postgresql://test")
+        repository._client = lambda: client
+        repository.ensure_camera_storage()
+
+        self.assertTrue(any("ADD COLUMN IF NOT EXISTS direction" in sql for sql in client.statements))
+
+    def test_plate_image_paths_are_replaced_with_shared_storage_ids(self) -> None:
+        from src.car_scan.database import DatabaseRepository
+
+        class Client:
+            def execute_raw(self, query, *params):
+                self.query = query
+                self.params = params
+                return 2
+
+        client = Client()
+        repository = DatabaseRepository("postgresql://test")
+        repository._client = lambda: client
+        updated = repository.replace_plate_image_reference(
+            "LED01/2026/10/07/thai/0001-LED01-plate_crops.webp",
+            "storage://12345678-1234-1234-1234-123456789abc",
+        )
+
+        self.assertEqual(updated, 2)
+        self.assertIn("raw_plate->>'crop_image'", client.query)
+        self.assertEqual(client.params[0], "LED01/2026/10/07/thai/0001-LED01-plate_crops.webp")
+        self.assertEqual(client.params[1], "storage://12345678-1234-1234-1234-123456789abc")
+
+
 class ScanCreateDataTests(unittest.TestCase):
     def test_maps_scan_and_nested_plates(self) -> None:
         result = {

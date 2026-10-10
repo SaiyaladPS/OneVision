@@ -22,6 +22,11 @@ const STRINGS = {
     shape_rectangle: "สี่เหลี่ยม",
     shape_circle: "วงกลม",
     shape_ellipse: "วงรี",
+    shape_lane: "เลน + เส้น Trigger",
+    lane_label: "LANE 1",
+    lane_border: "LANE BORDER",
+    trigger_line_label: "TRIGGER LINE",
+    roi_tip_lane: "ลากจุดสีน้ำเงินเพื่อปรับขอบเลน · ลากจุดสีเหลืองเพื่อย้ายเส้น Trigger · จะครอป/OCR เมื่อป้ายอยู่ในเลนและข้ามเส้นแล้ว",
     roi_full: "เต็มภาพ",
     roi_center: "กึ่งกลาง",
     roi_head: "พื้นที่สแกน (ROI)",
@@ -62,6 +67,13 @@ const STRINGS = {
     camera_list_head: "รายการกล้อง",
     camera_list_hint: "เลือกกล้องจากรายการนี้เพื่อเปิดหรือปิดการใช้งาน",
     camera_list_selected: "ใช้งาน {selected}/{total}",
+    camera_search_placeholder: "ค้นหาชื่อหรือ IP กล้อง...",
+    camera_direction_filter: "กรองตามทิศทาง",
+    camera_direction_all: "ทุกทิศทาง",
+    camera_direction_in: "ขาเข้า (IN)",
+    camera_direction_out: "ขาออก (OUT)",
+    camera_direction_unassigned: "ยังไม่กำหนดทิศทาง",
+    camera_filter_empty: "ไม่พบกล้องที่ตรงกับการค้นหา",
     camera_select_all: "เปิดทั้งหมด",
     camera_clear_all: "ปิดทั้งหมด",
     start_all_cameras: "เริ่มสแกนกล้องที่เลือก",
@@ -70,6 +82,10 @@ const STRINGS = {
     wall_page: "หน้า {page}/{pages}",
     wall_prev: "ก่อนหน้า",
     wall_next: "ถัดไป",
+    camera_focus: "ขยายเต็มจอ",
+    camera_exit_focus: "ออกจากโฟกัส",
+    camera_focus_add: "เพิ่มกล้องในมุมมอง",
+    camera_focus_remove: "นำกล้องออกจากมุมมอง",
     compute_label: "ประมวลผล",
     compute_auto: "อัตโนมัติ",
     compute_gpu: "GPU",
@@ -262,6 +278,11 @@ const STRINGS = {
     shape_rectangle: "ສີ່ຫຼ່ຽມ",
     shape_circle: "ວົງມົນ",
     shape_ellipse: "ວົງລີ",
+    shape_lane: "ເລນ + ເສັ້ນ Trigger",
+    lane_label: "LANE 1",
+    lane_border: "LANE BORDER",
+    trigger_line_label: "TRIGGER LINE",
+    roi_tip_lane: "ລາກຈຸດສີຟ້າເພື່ອປັບຂອບເລນ · ລາກຈຸດສີເຫຼືອງເພື່ອຍ້າຍ Trigger · ຈະ crop/OCR ເມື່ອປ້າຍຢູ່ໃນເລນ ແລະຂ້າມເສັ້ນແລ້ວ",
     roi_full: "ເຕັມພາບ",
     roi_center: "ກາງພາບ",
     roi_head: "ພື້ນທີ່ສະແກນ (ROI)",
@@ -302,6 +323,13 @@ const STRINGS = {
     camera_list_head: "ລາຍການກ້ອງ",
     camera_list_hint: "ເລືອກກ້ອງຈາກລາຍການນີ້ເພື່ອເປີດ ຫຼືປິດການໃຊ້ງານ",
     camera_list_selected: "ໃຊ້ງານ {selected}/{total}",
+    camera_search_placeholder: "ຄົ້ນຫາຊື່ ຫຼື IP ກ້ອງ...",
+    camera_direction_filter: "ກອງຕາມທິດທາງ",
+    camera_direction_all: "ທຸກທິດທາງ",
+    camera_direction_in: "ຂາເຂົ້າ (IN)",
+    camera_direction_out: "ຂາອອກ (OUT)",
+    camera_direction_unassigned: "ຍັງບໍ່ກຳນົດທິດທາງ",
+    camera_filter_empty: "ບໍ່ພົບກ້ອງທີ່ກົງກັບການຄົ້ນຫາ",
     camera_select_all: "ເປີດທັງໝົດ",
     camera_clear_all: "ປິດທັງໝົດ",
     start_all_cameras: "ເລີ່ມສະແກນກ້ອງທີ່ເລືອກ",
@@ -310,6 +338,10 @@ const STRINGS = {
     wall_page: "ໜ້າ {page}/{pages}",
     wall_prev: "ກ່ອນໜ້າ",
     wall_next: "ຕໍ່ໄປ",
+    camera_focus: "ຂະຫຍາຍເຕັມຈໍ",
+    camera_exit_focus: "ອອກຈາກໂຟກັດ",
+    camera_focus_add: "ເພີ່ມກ້ອງໃນມຸມມອງ",
+    camera_focus_remove: "ເອົາກ້ອງອອກຈາກມຸມມອງ",
     compute_label: "ປະມວນຜົນ",
     compute_auto: "ອັດຕະໂນມັດ",
     compute_gpu: "GPU",
@@ -502,6 +534,11 @@ const STRINGS = {
     shape_rectangle: "Rectangle",
     shape_circle: "Circle",
     shape_ellipse: "Ellipse",
+    shape_lane: "Lane + trigger line",
+    lane_label: "LANE 1",
+    lane_border: "LANE BORDER",
+    trigger_line_label: "TRIGGER LINE",
+    roi_tip_lane: "Drag blue points to adjust lane edges · drag yellow points to move the trigger line · crop/OCR starts only after a plate crosses the line inside the lane",
     roi_full: "Full frame",
     roi_center: "Center",
     roi_head: "Scan region (ROI)",
@@ -542,6 +579,13 @@ const STRINGS = {
     camera_list_head: "Camera list",
     camera_list_hint: "Use this separate list to turn cameras on or off",
     camera_list_selected: "Active {selected}/{total}",
+    camera_search_placeholder: "Search camera name or IP...",
+    camera_direction_filter: "Filter by direction",
+    camera_direction_all: "All directions",
+    camera_direction_in: "Inbound (IN)",
+    camera_direction_out: "Outbound (OUT)",
+    camera_direction_unassigned: "Unassigned direction",
+    camera_filter_empty: "No cameras match this search",
     camera_select_all: "Enable all",
     camera_clear_all: "Disable all",
     start_all_cameras: "Scan selected cameras",
@@ -550,6 +594,10 @@ const STRINGS = {
     wall_page: "Page {page}/{pages}",
     wall_prev: "Previous",
     wall_next: "Next",
+    camera_focus: "Focus full screen",
+    camera_exit_focus: "Exit focus",
+    camera_focus_add: "Add camera to view",
+    camera_focus_remove: "Remove camera from view",
     compute_label: "Compute",
     compute_auto: "Auto",
     compute_gpu: "GPU",
@@ -729,6 +777,8 @@ const state = {
   image: null,
   roi: { enabled: true, shape: "rectangle", x: 0.05, y: 0.1, width: 0.9, height: 0.8 },
   cameraRois: {},
+  cameraSearch: "",
+  cameraDirectionFilter: "all",
   roiPushTimers: {},
   drag: null,
   jobId: null,
@@ -763,6 +813,7 @@ const state = {
   selectedHost: "",
   cameraTransitions: {},
   cameraPage: 0,
+  cameraFocusHosts: [],
   wallLayoutFrame: 0,
 };
 
@@ -889,6 +940,7 @@ function retranslate() {
   shape.options[0].text = t("shape_rectangle");
   shape.options[1].text = t("shape_circle");
   shape.options[2].text = t("shape_ellipse");
+  shape.options[3].text = t("shape_lane");
   $("roiFull").textContent = t("roi_full");
   $("roiCenter").textContent = t("roi_center");
   $("roiHead").textContent = t("roi_head");
@@ -897,6 +949,7 @@ function retranslate() {
   $("previewHead").textContent = state.mode === "camera" ? t("worker_head") : t("preview_head");
   if ($("cameraWallPrev")) $("cameraWallPrev").textContent = t("wall_prev");
   if ($("cameraWallNext")) $("cameraWallNext").textContent = t("wall_next");
+  if ($("cameraFocusBtn")) $("cameraFocusBtn").textContent = state.cameraFocusHosts.length ? t("camera_exit_focus") : t("camera_focus");
   if (state.mode === "camera") {
     renderCameraSelector();
     renderCameraGrid();
@@ -937,6 +990,15 @@ function retranslate() {
   if ($("workerHint")) $("workerHint").textContent = t("worker_hint");
   if ($("cameraSelectorHead")) $("cameraSelectorHead").textContent = t("camera_list_head");
   if ($("cameraSelectorHint")) $("cameraSelectorHint").textContent = t("camera_list_hint");
+  if ($("cameraSearch")) $("cameraSearch").placeholder = t("camera_search_placeholder");
+  if ($("cameraDirectionFilter")) {
+    const directionFilter = $("cameraDirectionFilter");
+    directionFilter.setAttribute("aria-label", t("camera_direction_filter"));
+    directionFilter.options[0].textContent = t("camera_direction_all");
+    directionFilter.options[1].textContent = t("camera_direction_in");
+    directionFilter.options[2].textContent = t("camera_direction_out");
+    directionFilter.options[3].textContent = t("camera_direction_unassigned");
+  }
   if ($("cameraSelectAll")) $("cameraSelectAll").textContent = t("camera_select_all");
   if ($("cameraClearAll")) $("cameraClearAll").textContent = t("camera_clear_all");
   if ($("computeLabel")) $("computeLabel").textContent = t("compute_label");
@@ -1023,6 +1085,7 @@ function setMode(mode) {
     setStatus(t("no_permission"));
     return;
   }
+  if (mode !== "camera" && state.cameraFocusHosts.length) exitCameraFocus();
   state.mode = mode;
   if (mode === "camera") loadHealth().catch(() => {});
   document.querySelector(".app")?.classList.toggle("is-camera-mode", mode === "camera");
@@ -1124,6 +1187,13 @@ function draw() {
     ctx.strokeStyle = "#2563EB";
     ctx.lineWidth = 3;
     ctx.fillStyle = "rgba(37, 99, 235, 0.16)";
+    if (roi.shape === "lane") {
+      strokeRoiPath(ctx, roi, rx, ry, rw, rh);
+      ctx.fill();
+      ctx.stroke();
+      strokeTriggerLine(ctx, roi, g.x, g.y, g.w, g.h);
+      return;
+    }
     ctx.strokeRect(rx, ry, rw, rh);
     ctx.fillRect(rx, ry, rw, rh);
     ctx.fillStyle = "#60A5FA";
@@ -1141,6 +1211,26 @@ function draw() {
 }
 
 function clampRoi(roi) {
+  if (roi.shape === "lane") {
+    const base = laneRoiFromBounds(roi);
+    const clampPoint = (point) => ({
+      x: Math.max(0, Math.min(1, Number(point?.x) || 0)),
+      y: Math.max(0, Math.min(1, Number(point?.y) || 0)),
+    });
+    const points = (roi.points || base.points).map(clampPoint);
+    const trigger_line = (roi.trigger_line || base.trigger_line).map(clampPoint);
+    const xs = points.map((point) => point.x);
+    const ys = points.map((point) => point.y);
+    return {
+      ...roi,
+      points,
+      trigger_line,
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      width: Math.max(...xs) - Math.min(...xs),
+      height: Math.max(...ys) - Math.min(...ys),
+    };
+  }
   const width = Math.max(0.02, Math.min(1, roi.width));
   const height = Math.max(0.02, Math.min(1, roi.height));
   return {
@@ -1152,8 +1242,30 @@ function clampRoi(roi) {
   };
 }
 
-function copyRoi(roi = state.roi) {
+function laneRoiFromBounds(roi = {}) {
+  const numberOr = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+  const x = numberOr(roi.x, 0.08);
+  const y = numberOr(roi.y, 0.08);
+  const width = numberOr(roi.width, 0.84);
+  const height = numberOr(roi.height, 0.84);
   return {
+    ...roi,
+    shape: "lane",
+    points: [
+      { x, y: Math.min(1, y + height) },
+      { x: Math.min(1, x + width * 0.42), y },
+      { x: Math.min(1, x + width), y },
+      { x: Math.min(1, x + width * 0.78), y: Math.min(1, y + height) },
+    ],
+    trigger_line: [
+      { x: Math.min(1, x + width * 0.28), y: y + height * 0.58 },
+      { x: Math.min(1, x + width), y: y + height * 0.52 },
+    ],
+  };
+}
+
+function copyRoi(roi = state.roi) {
+  const copy = {
     enabled: roi?.enabled !== false,
     shape: roi?.shape || "rectangle",
     x: Number(roi?.x) || 0,
@@ -1161,6 +1273,9 @@ function copyRoi(roi = state.roi) {
     width: Number(roi?.width) || 1,
     height: Number(roi?.height) || 1,
   };
+  if (Array.isArray(roi?.points)) copy.points = roi.points.map((point) => ({ x: Number(point.x), y: Number(point.y) }));
+  if (Array.isArray(roi?.trigger_line)) copy.trigger_line = roi.trigger_line.map((point) => ({ x: Number(point.x), y: Number(point.y) }));
+  return copy;
 }
 
 function roiColor(host) {
@@ -1206,10 +1321,13 @@ function syncRoiToolbar() {
   const roi = host ? roiFor(host) : state.roi;
   if ($("roiEnabled")) $("roiEnabled").checked = roi.enabled !== false;
   if ($("roiShape")) $("roiShape").value = roi.shape || "rectangle";
+  if ($("roiShape")?.options[3]) $("roiShape").options[3].disabled = state.mode !== "camera";
   if ($("roiHead")) {
     $("roiHead").textContent = host ? t("roi_head_camera", { label: cameraLabelFor(host) }) : t("roi_head");
   }
-  if ($("roiTip")) $("roiTip").textContent = state.mode === "camera" ? t("roi_tip_camera") : t("roi_tip");
+  if ($("roiTip")) {
+    $("roiTip").textContent = roi.shape === "lane" ? t("roi_tip_lane") : state.mode === "camera" ? t("roi_tip_camera") : t("roi_tip");
+  }
 }
 
 function selectCameraHost(host, options = {}) {
@@ -1285,7 +1403,16 @@ function cameraFrameBox(canvas, img) {
 
 function strokeRoiPath(ctx, roi, rx, ry, rw, rh) {
   ctx.beginPath();
-  if (roi.shape === "circle") {
+  if (roi.shape === "lane") {
+    const points = roi.points || laneRoiFromBounds(roi).points;
+    points.forEach((point, index) => {
+      const x = rx + (point.x - roi.x) * (rw / Math.max(roi.width, 0.001));
+      const y = ry + (point.y - roi.y) * (rh / Math.max(roi.height, 0.001));
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+  } else if (roi.shape === "circle") {
     const radius = Math.min(rw, rh) / 2;
     ctx.arc(rx + rw / 2, ry + rh / 2, Math.max(1, radius), 0, Math.PI * 2);
   } else if (roi.shape === "ellipse") {
@@ -1293,6 +1420,22 @@ function strokeRoiPath(ctx, roi, rx, ry, rw, rh) {
   } else {
     ctx.rect(rx, ry, rw, rh);
   }
+}
+
+function strokeTriggerLine(ctx, roi, x, y, width, height) {
+  const line = roi.trigger_line || laneRoiFromBounds(roi).trigger_line;
+  if (!Array.isArray(line) || line.length !== 2) return;
+  ctx.save();
+  ctx.strokeStyle = "#FACC15";
+  ctx.fillStyle = "#FACC15";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(x + line[0].x * width, y + line[0].y * height);
+  ctx.lineTo(x + line[1].x * width, y + line[1].y * height);
+  ctx.stroke();
+  ctx.font = "bold 12px sans-serif";
+  ctx.fillText(t("trigger_line_label"), x + line[0].x * width + 6, y + line[0].y * height - 7);
+  ctx.restore();
 }
 
 function drawCameraRoi(host) {
@@ -1325,6 +1468,25 @@ function drawCameraRoi(host) {
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle = color;
+  if (roi.shape === "lane") {
+    const lanePoints = roi.points || laneRoiFromBounds(roi).points;
+    lanePoints.forEach((point) => {
+      ctx.beginPath();
+      ctx.arc(g.x + point.x * g.w, g.y + point.y * g.h, 6, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    strokeTriggerLine(ctx, roi, g.x, g.y, g.w, g.h);
+    ctx.fillStyle = "#FACC15";
+    (roi.trigger_line || laneRoiFromBounds(roi).trigger_line).forEach((point) => {
+      ctx.beginPath();
+      ctx.arc(g.x + point.x * g.w, g.y + point.y * g.h, 6, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.font = "bold 12px sans-serif";
+    ctx.fillText(t("lane_label"), g.x + lanePoints[0].x * g.w + 8, g.y + lanePoints[0].y * g.h - 8);
+    ctx.fillText(t("lane_border"), g.x + lanePoints[2].x * g.w - 92, g.y + lanePoints[2].y * g.h + 18);
+    return;
+  }
   [
     [rx, ry],
     [rx + rw, ry],
@@ -1346,6 +1508,30 @@ function cameraPosFromEvent(event, canvas, img) {
   return { x: (px - g.x) / g.w, y: (py - g.y) / g.h };
 }
 
+function laneHandleAt(p, roi) {
+  const points = roi.points || laneRoiFromBounds(roi).points;
+  for (let index = 0; index < points.length; index += 1) {
+    if (Math.hypot(p.x - points[index].x, p.y - points[index].y) < 0.025) return `point:${index}`;
+  }
+  const line = roi.trigger_line || laneRoiFromBounds(roi).trigger_line;
+  for (let index = 0; index < line.length; index += 1) {
+    if (Math.hypot(p.x - line[index].x, p.y - line[index].y) < 0.025) return `trigger:${index}`;
+  }
+  return "";
+}
+
+function pointInsideLane(p, points) {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i, i += 1) {
+    const a = points[i];
+    const b = points[j];
+    const crosses = ((a.y > p.y) !== (b.y > p.y))
+      && (p.x < ((b.x - a.x) * (p.y - a.y)) / ((b.y - a.y) || Number.EPSILON) + a.x);
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
 function bindCameraRoi(canvas, host) {
   if (canvas.dataset.bound === "1") return;
   canvas.dataset.bound = "1";
@@ -1357,14 +1543,17 @@ function bindCameraRoi(canvas, host) {
     canvas.setPointerCapture(event.pointerId);
     selectCameraHost(host);
     const roi = roiFor(host);
-    const handle = handleAt(p, roi);
-    const inside = p.x >= roi.x && p.x <= roi.x + roi.width && p.y >= roi.y && p.y <= roi.y + roi.height;
+    const laneMode = roi.shape === "lane";
+    const handle = laneMode ? laneHandleAt(p, roi) : handleAt(p, roi);
+    const inside = laneMode
+      ? pointInsideLane(p, roi.points || laneRoiFromBounds(roi).points)
+      : p.x >= roi.x && p.x <= roi.x + roi.width && p.y >= roi.y && p.y <= roi.y + roi.height;
     state.drag = {
       host,
       handle,
       start: p,
       roi: { ...roi },
-      mode: handle ? "resize" : inside ? "move" : "new",
+      mode: laneMode ? (handle ? "lane-handle" : inside ? "lane-move" : "lane-ignore") : handle ? "resize" : inside ? "move" : "new",
     };
     setRoiFor(host, { ...roi, enabled: true }, { push: false });
   });
@@ -1375,7 +1564,32 @@ function bindCameraRoi(canvas, host) {
     if (!p) return;
     const { start, roi, mode, handle } = state.drag;
     let next = { ...roi, enabled: true };
-    if (mode === "move") {
+    if (mode === "lane-handle") {
+      if (handle.startsWith("point:")) {
+        const points = [...(roi.points || laneRoiFromBounds(roi).points)];
+        points[Number(handle.split(":")[1])] = p;
+        next.points = points;
+      } else {
+        const trigger_line = [...(roi.trigger_line || laneRoiFromBounds(roi).trigger_line)];
+        trigger_line[Number(handle.split(":")[1])] = p;
+        next.trigger_line = trigger_line;
+      }
+    } else if (mode === "lane-move") {
+      const dx = p.x - start.x;
+      const dy = p.y - start.y;
+      const lane = roi.points && roi.trigger_line ? roi : laneRoiFromBounds(roi);
+      const allPoints = [...lane.points, ...lane.trigger_line];
+      const minDx = -Math.min(...allPoints.map((point) => point.x));
+      const maxDx = 1 - Math.max(...allPoints.map((point) => point.x));
+      const minDy = -Math.min(...allPoints.map((point) => point.y));
+      const maxDy = 1 - Math.max(...allPoints.map((point) => point.y));
+      const shiftX = Math.max(minDx, Math.min(maxDx, dx));
+      const shiftY = Math.max(minDy, Math.min(maxDy, dy));
+      next.points = lane.points.map((point) => ({ x: point.x + shiftX, y: point.y + shiftY }));
+      next.trigger_line = lane.trigger_line.map((point) => ({ x: point.x + shiftX, y: point.y + shiftY }));
+    } else if (mode === "lane-ignore") {
+      return;
+    } else if (mode === "move") {
       next = { ...next, x: roi.x + p.x - start.x, y: roi.y + p.y - start.y };
     } else if (mode === "new") {
       next = {
@@ -1645,7 +1859,7 @@ function renderResults() {
   state._resultsSig = signature;
   state._resultsSelected = state.selected;
   renderPlate(state.plates[state.selected] || null);
-  scrollPaneTo($("crops"), document.querySelector("#crops .crop-card.active"), "x");
+  scrollPaneTo($("crops"), document.querySelector("#crops .crop-card.active"), "y");
   scrollPaneTo(document.querySelector(".result-table-panel .table-wrap"), document.querySelector("#tableBody tr.active"), "y");
 }
 
@@ -1797,6 +2011,13 @@ function cameraLiveLabel(live, host = "") {
   return t("camera_idle");
 }
 
+function cameraDirection(camera) {
+  const direction = String(camera?.direction || "UNASSIGNED").trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (["IN", "INBOUND", "ENTRY", "ENTRANCE", "ARRIVAL", "เข้า", "ขาเข้า"].includes(direction)) return "IN";
+  if (["OUT", "OUTBOUND", "EXIT", "DEPARTURE", "ออก", "ขาออก"].includes(direction)) return "OUT";
+  return "UNASSIGNED";
+}
+
 function renderCameraSelector() {
   const list = $("cameraSelectorList");
   if (!list) return;
@@ -1810,29 +2031,105 @@ function renderCameraSelector() {
       total: cameras.length,
     });
   }
-  list.innerHTML = cameras.length
-    ? cameras.map((camera, index) => {
-      const live = liveCamera(camera.host);
-      const label = listedCameraLabel(camera) || `Camera ${String(index + 1).padStart(2, "0")}`;
-      const transition = cameraTransition(camera.host);
-      const checked = Boolean(live?.live || live?.starting || transition === "opening");
-      const busy = Boolean(transition);
-      const accessLabel = camera.can_scan === false ? t("camera_view_only") : t("camera_scan_allowed");
-      return `
-        <label class="camera-selector-item${checked ? " is-active" : ""}${busy ? " is-busy" : ""}" ${busy ? 'aria-busy="true"' : ""}>
-          <input type="checkbox" data-camera-toggle data-host="${escapeHtml(camera.host)}" ${checked ? "checked" : ""} ${busy ? "disabled" : ""} />
-          <span class="camera-selector-check" aria-hidden="true"></span>
-          <span class="camera-selector-copy">
-            <strong>${escapeHtml(label)}</strong>
-            <small>${escapeHtml(camera.host)}</small>
-          </span>
-          <span class="camera-selector-status">
-            <span class="camera-access-badge">${escapeHtml(accessLabel)}</span>
-            ${escapeHtml(cameraLiveLabel(live, camera.host))}
-          </span>
-        </label>`;
-    }).join("")
-    : `<p class="camera-selector-empty">${escapeHtml(t("ip_camera_add_placeholder"))}</p>`;
+  const query = String(state.cameraSearch || "").trim().toLocaleLowerCase();
+  const directionFilter = state.cameraDirectionFilter || "all";
+  const filterKey = `${query}\u0000${directionFilter}`;
+  const filtersChanged = state.cameraSelectorFilterKey !== undefined
+    && state.cameraSelectorFilterKey !== filterKey;
+  const previousScrollTop = filtersChanged ? 0 : list.scrollTop;
+  if (filtersChanged) list.scrollTop = 0;
+  state.cameraSelectorFilterKey = filterKey;
+  const filteredCameras = cameras.filter((camera) => {
+    const direction = cameraDirection(camera);
+    if (directionFilter !== "all" && direction !== directionFilter) return false;
+    if (!query) return true;
+    const searchable = [
+      listedCameraLabel(camera),
+      camera.host,
+      direction,
+      t(`camera_direction_${direction.toLowerCase()}`),
+    ].filter(Boolean).join(" ").toLocaleLowerCase();
+    return searchable.includes(query);
+  });
+  const retained = new Set();
+  filteredCameras.forEach((camera, order) => {
+    const host = String(camera.host || "");
+    if (!host) return;
+    retained.add(host);
+    let item = [...list.querySelectorAll(".camera-selector-item")]
+      .find((node) => node.dataset.host === host);
+    if (!item) {
+      item = document.createElement("label");
+      item.className = "camera-selector-item";
+      item.dataset.host = host;
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.dataset.cameraToggle = "";
+      input.dataset.host = host;
+      const check = document.createElement("span");
+      check.className = "camera-selector-check";
+      check.setAttribute("aria-hidden", "true");
+      const copy = document.createElement("span");
+      copy.className = "camera-selector-copy";
+      const name = document.createElement("strong");
+      const details = document.createElement("span");
+      details.className = "camera-selector-details";
+      const hostText = document.createElement("small");
+      const directionBadge = document.createElement("span");
+      directionBadge.className = "camera-direction-badge";
+      details.append(hostText, directionBadge);
+      copy.append(name, details);
+      const status = document.createElement("span");
+      status.className = "camera-selector-status";
+      const accessBadge = document.createElement("span");
+      accessBadge.className = "camera-access-badge";
+      const statusText = document.createElement("span");
+      statusText.className = "camera-live-status";
+      status.append(accessBadge, statusText);
+      item.append(input, check, copy, status);
+    }
+    const live = liveCamera(host);
+    const transition = cameraTransition(host);
+    const checked = Boolean(live?.live || live?.starting || transition === "opening");
+    const busy = Boolean(transition);
+    const direction = cameraDirection(camera);
+    const label = listedCameraLabel(camera)
+      || `Camera ${String(camera.index || cameras.indexOf(camera) + 1).padStart(2, "0")}`;
+    item.classList.toggle("is-active", checked);
+    item.classList.toggle("is-busy", busy);
+    if (busy) item.setAttribute("aria-busy", "true");
+    else item.removeAttribute("aria-busy");
+    const input = item.querySelector("input[data-camera-toggle]");
+    input.dataset.host = host;
+    input.checked = checked;
+    input.disabled = busy;
+    item.querySelector(".camera-selector-copy strong").textContent = label;
+    item.querySelector(".camera-selector-details small").textContent = host;
+    const directionBadge = item.querySelector(".camera-direction-badge");
+    directionBadge.className = `camera-direction-badge direction-${direction.toLowerCase()}`;
+    directionBadge.textContent = t(`camera_direction_${direction.toLowerCase()}`);
+    item.querySelector(".camera-access-badge").textContent = camera.can_scan === false
+      ? t("camera_view_only")
+      : t("camera_scan_allowed");
+    item.querySelector(".camera-live-status").textContent = cameraLiveLabel(live, host);
+    const atPosition = list.children[order];
+    if (atPosition !== item) list.insertBefore(item, atPosition || null);
+  });
+  [...list.querySelectorAll(".camera-selector-item")].forEach((item) => {
+    if (!retained.has(item.dataset.host)) item.remove();
+  });
+  let empty = list.querySelector(".camera-selector-empty");
+  if (!filteredCameras.length) {
+    if (!empty) {
+      empty = document.createElement("p");
+      empty.className = "camera-selector-empty";
+      list.appendChild(empty);
+    }
+    empty.textContent = cameras.length ? t("camera_filter_empty") : t("ip_camera_add_placeholder");
+  } else {
+    empty?.remove();
+  }
+  list.scrollTop = Math.min(previousScrollTop, Math.max(0, list.scrollHeight - list.clientHeight));
 }
 
 function cameraRef() {
@@ -2016,6 +2313,15 @@ function bindVisibleCameraStreams() {
 
 function activeCameraList() {
   const activeHosts = new Set(liveCameras().filter((camera) => camera.live || camera.starting).map((camera) => camera.host));
+  // Keep a focused tile mounted through a short reconnect/error transition.
+  // Otherwise one transient worker snapshot removes its picker button and
+  // exits focus mode before the operator can select it again.
+  state.cameraFocusHosts.forEach((host) => {
+    if (cameraTransition(host) !== "stopping"
+      && (state.ipCameras || []).some((camera) => camera.host === host && camera.can_view !== false)) {
+      activeHosts.add(host);
+    }
+  });
   return (state.ipCameras || []).filter((camera) => activeHosts.has(camera.host));
 }
 
@@ -2026,15 +2332,32 @@ function layoutCameraWall() {
   if (!grid || state.mode !== "camera") return;
   const listed = activeCameraList();
   const total = listed.length;
+  const activeHosts = new Set(listed.map((camera) => camera.host));
+  state.cameraFocusHosts = state.cameraFocusHosts.filter((host) => activeHosts.has(host));
+  if (!state.cameraFocusHosts.length) {
+    document.querySelector(".app")?.classList.remove("is-camera-focus");
+  }
+  const focusedHosts = new Set(state.cameraFocusHosts);
+  const isFocused = focusedHosts.size > 0;
   const width = grid.clientWidth || 640;
   const height = grid.clientHeight || 320;
   const wall = cameraWallLayout(Math.max(1, total), width, height);
-  const pages = Math.max(1, Math.ceil(Math.max(total, 1) / wall.pageSize));
+  const pages = isFocused ? 1 : Math.max(1, Math.ceil(Math.max(total, 1) / wall.pageSize));
   if (state.cameraPage >= pages) state.cameraPage = 0;
   const start = state.cameraPage * wall.pageSize;
-  const visible = listed.slice(start, start + wall.pageSize);
+  const visible = isFocused
+    ? listed.filter((camera) => focusedHosts.has(camera.host))
+    : listed.slice(start, start + wall.pageSize);
   const visibleCount = Math.max(1, visible.length);
   const pageLayout = cameraWallLayout(visibleCount, width, height);
+  grid.classList.toggle("is-focus", isFocused);
+  const focusButton = $("cameraFocusBtn");
+  if (focusButton) {
+    focusButton.hidden = state.mode !== "camera" || total === 0;
+    focusButton.classList.toggle("hidden", state.mode !== "camera" || total === 0);
+    focusButton.textContent = isFocused ? t("camera_exit_focus") : t("camera_focus");
+    focusButton.setAttribute("aria-pressed", isFocused ? "true" : "false");
+  }
   grid.style.setProperty("--wall-cols", String(pageLayout.cols));
   grid.style.setProperty("--wall-rows", String(Math.max(pageLayout.rows, Math.ceil(visibleCount / pageLayout.cols))));
   grid.dataset.pageSize = String(wall.pageSize);
@@ -2042,9 +2365,10 @@ function layoutCameraWall() {
   [...grid.querySelectorAll("[data-host]")].forEach((tile) => {
     tile.classList.toggle("is-offpage", !known.has(tile.dataset.host));
   });
-  if (meta) meta.textContent = total ? t("wall_cameras", { n: total }) : "";
+  if (meta) meta.textContent = total ? t("wall_cameras", { n: isFocused ? visibleCount : total }) : "";
+  renderCameraFocusPicker(listed, focusedHosts);
   if (pager) {
-    const many = pages > 1;
+    const many = pages > 1 && !isFocused;
     pager.hidden = !many;
     pager.classList.toggle("hidden", !many);
     if ($("cameraWallPageLabel")) {
@@ -2063,6 +2387,70 @@ function shiftCameraWall(delta) {
   const pages = Math.max(1, Math.ceil(Math.max(listed.length, 1) / pageSize));
   state.cameraPage = (state.cameraPage + delta + pages) % pages;
   layoutCameraWall();
+}
+
+function focusCamera(host) {
+  if (!host || !activeCameraList().some((camera) => camera.host === host)) return;
+  selectCameraHost(host);
+  state.cameraFocusHosts = [host];
+  document.querySelector(".app")?.classList.add("is-camera-focus");
+  layoutCameraWall();
+}
+
+function toggleCameraFocus(host) {
+  if (!activeCameraList().some((camera) => camera.host === host)) return;
+  if (state.cameraFocusHosts.includes(host)) {
+    state.cameraFocusHosts = state.cameraFocusHosts.filter((item) => item !== host);
+  } else {
+    state.cameraFocusHosts = [...state.cameraFocusHosts, host];
+  }
+  if (!state.cameraFocusHosts.length) {
+    exitCameraFocus();
+    return;
+  }
+  document.querySelector(".app")?.classList.add("is-camera-focus");
+  layoutCameraWall();
+}
+
+function exitCameraFocus() {
+  state.cameraFocusHosts = [];
+  document.querySelector(".app")?.classList.remove("is-camera-focus");
+  layoutCameraWall();
+}
+
+function renderCameraFocusPicker(cameras, focusedHosts) {
+  const picker = $("cameraFocusPicker");
+  if (!picker) return;
+  picker.hidden = !focusedHosts.size;
+  if (!focusedHosts.size) return;
+  const retained = new Set();
+  cameras.forEach((camera, order) => {
+    const host = String(camera.host || "");
+    if (!host) return;
+    retained.add(host);
+    let button = [...picker.querySelectorAll(".camera-focus-choice")]
+      .find((node) => node.dataset.host === host);
+    if (!button) {
+      button = document.createElement("button");
+      button.type = "button";
+      button.dataset.host = host;
+      button.className = "btn ghost camera-focus-choice";
+      button.addEventListener("click", () => toggleCameraFocus(host));
+    }
+    const label = listedCameraLabel(camera)
+      || liveCamera(camera.host)?.label
+      || `Camera ${String(camera.index || order + 1).padStart(2, "0")}`;
+    const included = focusedHosts.has(camera.host);
+    button.classList.toggle("is-active", included);
+    button.textContent = label;
+    button.setAttribute("aria-pressed", included ? "true" : "false");
+    button.title = included ? t("camera_focus_remove") : t("camera_focus_add");
+    const atPosition = picker.children[order];
+    if (atPosition !== button) picker.insertBefore(button, atPosition || null);
+  });
+  [...picker.querySelectorAll(".camera-focus-choice")].forEach((button) => {
+    if (!retained.has(button.dataset.host)) button.remove();
+  });
 }
 
 function renderCameraGrid() {
@@ -2095,6 +2483,7 @@ function renderCameraGrid() {
                 <strong data-role="plate"></strong>
               </div>
               <div class="camera-tile-actions">
+                <button type="button" class="btn ghost" data-action="focus"></button>
                 <button type="button" class="btn ghost" data-action="snap"></button>
               </div>
             </div>
@@ -2106,11 +2495,18 @@ function renderCameraGrid() {
         const button = event.target.closest("[data-action]");
         selectCameraHost(host);
         if (!button) return;
+        if (button.dataset.action === "focus") {
+          event.preventDefault();
+          event.stopPropagation();
+          focusCamera(host);
+          return;
+        }
         if (button.dataset.action === "snap") {
           event.preventDefault();
           snapshot(host).catch((error) => setStatus(String(error)));
         }
       });
+      tile.addEventListener("dblclick", () => focusCamera(host));
       grid.appendChild(tile);
     }
     const live = liveCamera(host);
@@ -2132,6 +2528,9 @@ function renderCameraGrid() {
           : t("camera_idle");
     tile.querySelector("[data-role=plate]").textContent = live?.last_plate || "";
     tile.querySelector("[data-action=snap]").textContent = t("cam_snap");
+    tile.querySelector("[data-action=focus]").textContent = "⛶";
+    tile.querySelector("[data-action=focus]").title = t("camera_focus");
+    tile.querySelector("[data-action=focus]").setAttribute("aria-label", `${t("camera_focus")} ${label}`);
     tile.querySelector("[data-action=snap]").disabled = !live?.live;
     tile.classList.toggle("is-live", Boolean(live?.live));
     tile.classList.toggle("is-starting", Boolean(live?.starting));
@@ -3381,6 +3780,16 @@ function bind() {
   $("camerasToolbarBtn").addEventListener("click", openCameras);
   $("cameraWallPrev")?.addEventListener("click", () => shiftCameraWall(-1));
   $("cameraWallNext")?.addEventListener("click", () => shiftCameraWall(1));
+  $("cameraFocusBtn")?.addEventListener("click", () => {
+    if (state.cameraFocusHosts.length) {
+      exitCameraFocus();
+      return;
+    }
+    const active = activeCameraList();
+    const selected = selectedCameraHost();
+    const host = active.some((camera) => camera.host === selected) ? selected : active[0]?.host;
+    if (host) focusCamera(host);
+  });
   $("historyBtn").addEventListener("click", openHistory);
   $("historyClose").addEventListener("click", closeHistory);
   $("historyPrint").addEventListener("click", () => window.print());
@@ -3444,7 +3853,9 @@ function bind() {
     if (state.mode === "camera") {
       const host = selectedCameraHost();
       if (!host) return;
-      setRoiFor(host, { ...roiFor(host), shape, enabled: true });
+      const current = roiFor(host);
+      const next = shape === "lane" ? { ...laneRoiFromBounds(current), enabled: true } : { ...current, shape, enabled: true };
+      setRoiFor(host, next);
     } else {
       state.roi.shape = shape;
       draw();
@@ -3454,7 +3865,11 @@ function bind() {
     if (state.mode === "camera") {
       const host = selectedCameraHost();
       if (!host) return;
-      setRoiFor(host, { ...roiFor(host), enabled: true, x: 0, y: 0, width: 1, height: 1 });
+      const current = roiFor(host);
+      const next = current.shape === "lane"
+        ? { ...current, enabled: true, points: [{ x: 0, y: 1 }, { x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }], trigger_line: [{ x: 0, y: 0.5 }, { x: 1, y: 0.5 }] }
+        : { ...current, enabled: true, x: 0, y: 0, width: 1, height: 1 };
+      setRoiFor(host, next);
       return;
     }
     state.roi = clampRoi({ ...state.roi, enabled: true, x: 0, y: 0, width: 1, height: 1 });
@@ -3465,7 +3880,11 @@ function bind() {
     if (state.mode === "camera") {
       const host = selectedCameraHost();
       if (!host) return;
-      setRoiFor(host, { ...roiFor(host), enabled: true, x: 0.2, y: 0.2, width: 0.6, height: 0.6 });
+      const current = roiFor(host);
+      const next = current.shape === "lane"
+        ? { ...laneRoiFromBounds({ x: 0.2, y: 0.2, width: 0.6, height: 0.6 }), enabled: true }
+        : { ...current, enabled: true, x: 0.2, y: 0.2, width: 0.6, height: 0.6 };
+      setRoiFor(host, next);
       return;
     }
     state.roi = clampRoi({ ...state.roi, enabled: true, x: 0.1, y: 0.1, width: 0.8, height: 0.8 });
@@ -3505,6 +3924,14 @@ function bind() {
       setStatus(String(error));
       refreshWorker().catch(() => {});
     });
+  });
+  $("cameraSearch")?.addEventListener("input", (event) => {
+    state.cameraSearch = event.target.value;
+    renderCameraSelector();
+  });
+  $("cameraDirectionFilter")?.addEventListener("change", (event) => {
+    state.cameraDirectionFilter = event.target.value;
+    renderCameraSelector();
   });
   $("cameraSelectAll")?.addEventListener("click", () => {
     setAllCameraSelections(true).catch((error) => setStatus(String(error)));
@@ -3546,6 +3973,11 @@ function bind() {
     renderResults();
   });
   document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.cameraFocusHosts.length) {
+      event.preventDefault();
+      exitCameraFocus();
+      return;
+    }
     if (!state.plates.length) return;
     const tag = String(event.target?.tagName || "");
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;

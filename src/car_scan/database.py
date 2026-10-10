@@ -210,6 +210,7 @@ def compact_plate_record(plate: dict[str, Any], output_dir: Path | str | None = 
         "plate_prefix": plate.get("plate_prefix"),
         "plate_prefix_code": plate.get("plate_prefix_code"),
         "plate_number": plate.get("plate_number"),
+        "camera_label": plate.get("camera_label"),
         "vehicle_type": _text(_vehicle_type(plate)),
         "vehicle_type_confidence": _float_value(
             plate.get("vehicle_type_confidence")
@@ -376,6 +377,28 @@ def scan_create_data(
     if plates:
         data["plates"] = {"create": plates}
     return data
+
+
+def _queue_report_plate_images(
+    plate_id: int,
+    plate: dict[str, Any],
+    output_dir: Path | str | None = None,
+) -> None:
+    """Upload locally archived plate images after their database row exists."""
+
+    try:
+        from .report_storage import enqueue_plate_images
+
+        enqueue_plate_images(
+            plate_id,
+            output_dir=Path(output_dir) if output_dir else None,
+            full=plate.get("full_vehicle_image"),
+            crop=plate.get("crop_image") or plate.get("ocr_ready_archive_image"),
+            ocr=plate.get("ocr_ready_image") or plate.get("ocr_ready_archive_image"),
+        )
+    except Exception:
+        # Image sync must not make a successful PostgreSQL scan save fail.
+        LOGGER.exception("Could not queue plate images for Report upload: %s", plate_id)
 
 
 def plate_query_terms(raw: str) -> list[str]:
@@ -731,9 +754,45 @@ class DatabaseRepository:
         self._client().execute_raw(
             "ALTER TABLE cameras ADD COLUMN IF NOT EXISTS roi_json TEXT"
         )
+        self._client().execute_raw(
+            "ALTER TABLE cameras ADD COLUMN IF NOT EXISTS direction TEXT NOT NULL DEFAULT 'UNASSIGNED'"
+        )
 
     def ping(self) -> None:
         self._client().query_raw("SELECT 1")
+
+    def replace_plate_image_reference(self, local_path: str, storage_uri: str) -> int:
+        """Replace matching local plate-image paths with a portable storage URI."""
+
+        source = str(local_path or "").replace("\\", "/").lstrip("./")
+        target = str(storage_uri or "").strip()
+        if not source or not target.startswith("storage://"):
+            return 0
+        return int(self._client().execute_raw(
+            """
+            UPDATE plates SET
+                vehicle_image = CASE
+                    WHEN vehicle_image = $1 OR raw_plate->>'full_vehicle_image' = $1 THEN $2
+                    ELSE vehicle_image END,
+                crop_image = CASE
+                    WHEN crop_image = $1 OR raw_plate->>'crop_image' = $1 THEN $2
+                    ELSE crop_image END,
+                ocr_ready_image = CASE
+                    WHEN ocr_ready_image = $1 OR raw_plate->>'ocr_ready_image' = $1 THEN $2
+                    ELSE ocr_ready_image END,
+                raw_plate = raw_plate || jsonb_strip_nulls(jsonb_build_object(
+                    'full_vehicle_image', CASE WHEN raw_plate->>'full_vehicle_image' = $1 THEN $2 END,
+                    'crop_image', CASE WHEN raw_plate->>'crop_image' = $1 THEN $2 END,
+                    'ocr_ready_image', CASE WHEN raw_plate->>'ocr_ready_image' = $1 THEN $2 END
+                ))
+            WHERE vehicle_image = $1 OR crop_image = $1 OR ocr_ready_image = $1
+               OR raw_plate->>'full_vehicle_image' = $1
+               OR raw_plate->>'crop_image' = $1
+               OR raw_plate->>'ocr_ready_image' = $1
+            """,
+            source,
+            target,
+        ))
 
     def list_cameras(self, *, enabled_only: bool = True) -> list[dict[str, Any]]:
         """Return CCTV settings without exposing credentials through the API."""
@@ -741,7 +800,7 @@ class DatabaseRepository:
         where = "WHERE enabled = TRUE" if enabled_only else ""
         rows = self._client().query_raw(
             """
-            SELECT id, host, stream_url, label, kind, device_index, enabled, roi_json,
+            SELECT id, host, stream_url, label, kind, device_index, enabled, roi_json, direction,
                    created_at, updated_at
             FROM cameras
             """ + where + " ORDER BY id ASC"
@@ -756,6 +815,7 @@ class DatabaseRepository:
                 "device_index": row.get("device_index"),
                 "enabled": bool(row.get("enabled", True)),
                 "roi": self._decode_camera_roi(row.get("roi_json")),
+                "direction": str(row.get("direction") or "UNASSIGNED"),
                 "created_at": row.get("created_at"),
                 "updated_at": row.get("updated_at"),
             }
@@ -893,6 +953,14 @@ class DatabaseRepository:
             LOGGER.exception("Failed to insert scan_runs row")
             raise
         scan_id = int(created.id)
+        source_plates = [plate for plate in result.get("plates") or [] if isinstance(plate, dict)]
+        if source_plates:
+            created_plates = self._client().plate.find_many(
+                where={"scanId": scan_id},
+                order_by={"id": "asc"},
+            )
+            for source_plate, created_plate in zip(source_plates, created_plates):
+                _queue_report_plate_images(int(created_plate.id), source_plate, output_dir)
         publish_event(
             "SCAN_SAVED",
             scan_id=scan_id,
@@ -915,6 +983,7 @@ class DatabaseRepository:
         client = self._client()
         if plate_pk is not None:
             client.plate.update(where={"id": plate_pk}, data=row)
+            _queue_report_plate_images(int(plate_pk), plate, output_dir)
             publish_event(
                 "PLATE_SAVED",
                 scan_id=scan_id,
@@ -923,6 +992,7 @@ class DatabaseRepository:
             )
             return int(plate_pk)
         created = client.plate.create(data={**row, "scanId": scan_id})
+        _queue_report_plate_images(int(created.id), plate, output_dir)
         count = int(client.plate.count(where={"scanId": scan_id}))
         client.scanrun.update(where={"id": scan_id}, data={"plateCount": count})
         publish_event(

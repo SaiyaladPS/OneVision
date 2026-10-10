@@ -68,6 +68,7 @@ from .database import (
 )
 from .report_storage import central_storage_file_id, fetch_remote_image
 from .service import ScanService
+from .training import training_runs
 from .worker import WorkerPool
 from .realtime import event_hub, publish_roi_event, serve_websocket
 
@@ -172,9 +173,12 @@ def _parse_roi(raw: str | None) -> dict[str, Any] | None:
     y = max(0.0, min(1.0, y))
     width = max(0.01, min(1.0 - x, width))
     height = max(0.01, min(1.0 - y, height))
-    return {
+    shape = str(data.get("shape") or "rectangle").lower()
+    if shape not in {"rectangle", "circle", "ellipse", "lane"}:
+        raise HTTPException(status_code=400, detail="ROI shape ไม่รองรับ")
+    result = {
         "enabled": enabled,
-        "shape": str(data.get("shape") or "rectangle").lower(),
+        "shape": shape,
         "unit": "normalized",
         "x": x,
         "y": y,
@@ -183,6 +187,58 @@ def _parse_roi(raw: str | None) -> dict[str, Any] | None:
         "color": "#f25c05",
         "thickness": 3,
     }
+    if shape == "lane":
+        raw_points = data.get("points")
+        if not isinstance(raw_points, list) or len(raw_points) < 3:
+            raw_points = [
+                {"x": x, "y": y + height},
+                {"x": x + width * 0.42, "y": y},
+                {"x": x + width, "y": y},
+                {"x": x + width * 0.78, "y": y + height},
+            ]
+
+        def normalize_points(raw: Any, expected: int | None = None) -> list[dict[str, float]]:
+            if not isinstance(raw, list) or (expected is not None and len(raw) != expected):
+                raise HTTPException(status_code=400, detail="พิกัด ROI lane ไม่ถูกต้อง")
+            points: list[dict[str, float]] = []
+            for point in raw:
+                try:
+                    px, py = (
+                        (point.get("x"), point.get("y"))
+                        if isinstance(point, dict)
+                        else (point[0], point[1])
+                    )
+                    px, py = float(px), float(py)
+                except (TypeError, ValueError, IndexError, KeyError) as error:
+                    raise HTTPException(status_code=400, detail="พิกัด ROI lane ไม่ถูกต้อง") from error
+                if not (0.0 <= px <= 1.0 and 0.0 <= py <= 1.0):
+                    raise HTTPException(status_code=400, detail="พิกัด ROI lane ต้องอยู่ในภาพ")
+                points.append({"x": px, "y": py})
+            return points
+
+        points = normalize_points(raw_points)
+        if len(points) < 3:
+            raise HTTPException(status_code=400, detail="ROI lane ต้องมีอย่างน้อย 3 จุด")
+        raw_line = data.get("trigger_line")
+        if raw_line is None:
+            xs = [point["x"] for point in points]
+            ys = [point["y"] for point in points]
+            middle_y = (min(ys) + max(ys)) / 2
+            raw_line = [{"x": min(xs), "y": middle_y}, {"x": max(xs), "y": middle_y}]
+        trigger_line = normalize_points(raw_line, expected=2)
+        xs = [point["x"] for point in points]
+        ys = [point["y"] for point in points]
+        result.update(
+            {
+                "x": min(xs),
+                "y": min(ys),
+                "width": max(xs) - min(xs),
+                "height": max(ys) - min(ys),
+                "points": points,
+                "trigger_line": trigger_line,
+            }
+        )
+    return result
 
 
 def _coerce_roi(value: Any) -> dict[str, Any] | None:
@@ -621,8 +677,11 @@ def _start_lane(
     index: int | None = None,
     roi: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    listed = next(
+        (item for item in _camera_payload(Settings.from_env()) if item["host"].lower() == host.lower()),
+        None,
+    )
     if index is None:
-        listed = next((item for item in _camera_payload(Settings.from_env()) if item["host"] == host), None)
         if listed and isinstance(listed.get("index"), int):
             index = int(listed["index"])
     try:
@@ -632,6 +691,7 @@ def _start_lane(
             scan=scan,
             index=index,
             roi=roi,
+            display_label=str((listed or {}).get("label") or ""),
             **_operator_fields(user),
         )
     except RuntimeError as error:
@@ -709,6 +769,7 @@ def _legacy_camera_records(legacy: list[dict[str, Any]]) -> list[dict[str, Any]]
             "kind": "local" if parse_local_camera(item.get("url", "") or item.get("host", "")) else "ip",
             "device_index": (parse_local_camera(item.get("url", "") or item.get("host", "")) or ("", None))[1],
             "enabled": True,
+            "direction": str(item.get("direction") or "UNASSIGNED"),
         }
         for item in legacy
     ]
@@ -991,10 +1052,15 @@ def _camera_payload(settings: Settings, user: dict[str, Any] | None = None) -> l
             known_hosts.add(host.lower())
     labels = {str(item["host"]).lower(): item.get("label", "") for item in records}
     rois = {str(item["host"]).lower(): item.get("roi") for item in records if item.get("roi")}
+    directions = {
+        str(item["host"]).lower(): str(item.get("direction") or "UNASSIGNED")
+        for item in records
+    }
     for camera in cameras:
         custom_label = labels.get(camera["host"].lower()) or ""
         camera["label"] = custom_label or camera["label"]
         camera["custom_label"] = bool(custom_label)
+        camera["direction"] = directions.get(camera["host"].lower(), "UNASSIGNED")
         saved_roi = rois.get(camera["host"].lower())
         if isinstance(saved_roi, dict):
             camera["roi"] = saved_roi
@@ -1186,6 +1252,125 @@ def create_app() -> FastAPI:
             "compute_hybrid": bool(gpu.get("hybrid")),
             "active_cameras": int(gpu.get("active_cameras") or 0),
         }
+
+    def require_training_api_token(request: Request) -> None:
+        # Load .env for direct source runs before checking the private service token.
+        Settings.from_env()
+        expected = str(os.getenv("CAR_SCAN_TRAIN_API_TOKEN") or "").strip()
+        authorization = request.headers.get("authorization", "")
+        supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+        if not expected:
+            raise HTTPException(status_code=503, detail="Model training API is not configured")
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    @app.get("/api/training")
+    def training_status(request: Request) -> dict[str, Any]:
+        require_training_api_token(request)
+        return training_runs.status()
+
+    @app.get("/api/training/datasets")
+    def training_datasets(request: Request, refresh: bool = False) -> dict[str, Any]:
+        require_training_api_token(request)
+        return training_runs.datasets(force_refresh=refresh)
+
+    @app.get("/api/training/results")
+    def training_results(request: Request, refresh: bool = False) -> dict[str, Any]:
+        require_training_api_token(request)
+        return training_runs.results(force_refresh=refresh)
+
+    @app.post("/api/training/datasets/upload")
+    async def training_dataset_upload(request: Request) -> dict[str, Any]:
+        require_training_api_token(request)
+        model = request.headers.get("x-dataset-model", "")
+        dataset_name = request.headers.get("x-dataset-name", "")
+        if request.headers.get("content-type", "").split(";", 1)[0].lower() not in {"application/zip", "application/x-zip-compressed"}:
+            raise HTTPException(status_code=415, detail="Upload a ZIP archive")
+        archive_buffer = bytearray()
+        async for chunk in request.stream():
+            if len(archive_buffer) + len(chunk) > 256 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="Dataset ZIP exceeds the 256 MB upload limit")
+            archive_buffer.extend(chunk)
+        archive = bytes(archive_buffer)
+        try:
+            return training_runs.upload_dataset(model=model, dataset_name=dataset_name, archive=archive)
+        except FileExistsError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except OSError as error:
+            raise HTTPException(status_code=500, detail="Could not save the uploaded dataset") from error
+
+    @app.post("/api/training/datasets/split")
+    async def training_dataset_split(request: Request) -> dict[str, Any]:
+        require_training_api_token(request)
+        try:
+            payload = await request.json()
+        except Exception as error:
+            raise HTTPException(status_code=400, detail="Expected a JSON split configuration") from error
+        if not isinstance(payload, dict) or not isinstance(payload.get("percentages"), dict):
+            raise HTTPException(status_code=400, detail="Expected model, dataset, and split percentages")
+        try:
+            return training_runs.split_dataset(
+                model=str(payload.get("model") or ""),
+                dataset_id=str(payload.get("dataset") or ""),
+                percentages=payload["percentages"],
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except OSError as error:
+            raise HTTPException(status_code=500, detail="Could not split the dataset") from error
+
+    @app.delete("/api/training/datasets")
+    def training_dataset_delete(request: Request, model: str, dataset: str) -> dict[str, Any]:
+        require_training_api_token(request)
+        try:
+            return training_runs.delete_dataset(model=model, dataset_id=dataset)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except OSError as error:
+            raise HTTPException(status_code=500, detail="Could not delete the dataset") from error
+
+    @app.post("/api/training/start")
+    async def training_start(request: Request) -> dict[str, Any]:
+        require_training_api_token(request)
+        try:
+            payload = await request.json()
+        except Exception as error:
+            raise HTTPException(status_code=400, detail="Expected a JSON training configuration") from error
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Expected a JSON training configuration")
+        try:
+            return training_runs.start(
+                model=str(payload.get("model") or ""),
+                epochs=int(payload.get("epochs", 50)),
+                batch=int(payload.get("batch", 16)),
+                image_size=int(payload.get("imageSize", 640)),
+                workers=int(payload.get("workers", 0)),
+                device=str(payload.get("device") or "auto"),
+                resume=payload.get("resume") is True,
+                dataset=str(payload.get("dataset") or "all"),
+                server_id=str(payload.get("serverId") or "local"),
+            )
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @app.post("/api/training/stop")
+    def training_stop(request: Request) -> dict[str, Any]:
+        require_training_api_token(request)
+        return training_runs.stop()
 
     @app.websocket("/ws")
     async def onevision_websocket(websocket: WebSocket):
@@ -1390,6 +1575,10 @@ def create_app() -> FastAPI:
             payload = {}
         settings = Settings.from_env()
         cameras = _camera_pairs(settings)
+        camera_labels = {
+            str(item.get("host") or "").lower(): str(item.get("label") or "")
+            for item in _camera_payload(settings, user)
+        }
         permissions = _camera_permissions(settings, user)
         if permissions is not None:
             cameras = [
@@ -1414,7 +1603,14 @@ def create_app() -> FastAPI:
             rois = {str(key): _coerce_roi(value) for key, value in raw_rois.items() if _coerce_roi(value)}
 
         def boot() -> dict[str, Any]:
-            return _worker().start_all(cameras, scan=True, roi=roi, rois=rois, **fields)
+            return _worker().start_all(
+                cameras,
+                scan=True,
+                roi=roi,
+                rois=rois,
+                camera_labels=camera_labels,
+                **fields,
+            )
 
         snapshot = await run_in_threadpool(boot)
         return JSONResponse(_filter_worker_snapshot(snapshot, settings, user))

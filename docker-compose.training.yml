@@ -1,0 +1,10 @@
+# Optional production overlay for remote CPU training workers.
+# Example: docker compose -f docker-compose.yml -f docker-compose.training.yml up -d --build
+services:
+  web:
+    environment:
+      CAR_SCAN_TRAIN_SSH_KEY: /run/secrets/training_worker_key
+      CAR_SCAN_TRAIN_SSH_KNOWN_HOSTS: /run/secrets/training_worker_known_hosts
+    volumes:
+      - "${CAR_SCAN_TRAIN_SSH_KEY_FILE:?Set CAR_SCAN_TRAIN_SSH_KEY_FILE to a dedicated private key}:/run/secrets/training_worker_key:ro"
+      - "${CAR_SCAN_TRAIN_SSH_KNOWN_HOSTS_FILE:?Set CAR_SCAN_TRAIN_SSH_KNOWN_HOSTS_FILE to a pinned known_hosts file}:/run/secrets/training_worker_known_hosts:ro"

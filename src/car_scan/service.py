@@ -51,6 +51,7 @@ class LiveScanSession:
     # Keeping this count lets the live worker increase sampling just before a
     # fast vehicle reaches the configured scan area.
     roi_waiting_count: int = 0
+    roi_trigger_tracks: list[dict[str, Any]] = field(default_factory=list)
     last_published: list[dict[str, Any]] = field(default_factory=list)
     pending_ocr: list[tuple[dict[str, Any], Any]] = field(default_factory=list)
     # Frame index of the previous processed sample and the resulting track
@@ -71,6 +72,7 @@ class ScanService:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._archive_sequence_lock = threading.Lock()
         self._scanner: Any = None
         self._preprocess_plate_crop: Callable[..., Any] | None = None
         self._write_image: Callable[..., Any] | None = None
@@ -179,6 +181,7 @@ class ScanService:
         cached_vehicle_types: list[dict[str, Any]] | None,
         *,
         run_ocr: bool = False,
+        roi_trigger_context: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], Any, list[dict[str, Any]] | None]:
         """One detector pass using the video scan settings."""
 
@@ -186,17 +189,22 @@ class ScanService:
             cached_vehicle_types is None
             or (sampled_frames - 1) % self.settings.stream_vehicle_refresh_scans == 0
         )
+        scan_options = {
+            "run_ocr": run_ocr,
+            "vehicle_type_confidence": self.settings.vehicle_type_confidence,
+            "plate_type_confidence": self.settings.plate_type_confidence,
+            "fast_mode": not self.settings.full_accuracy_mode,
+            "vehicle_types_override": (None if refresh_vehicle_types else cached_vehicle_types),
+        }
+        if roi_trigger_context is not None:
+            scan_options["roi_trigger_context"] = roi_trigger_context
         plates, annotated = scanner.scan(
             frame,
             self.settings.detector_confidence,
             self.settings.character_confidence,
             self.settings.padding,
             self.settings.imgsz,
-            run_ocr=run_ocr,
-            vehicle_type_confidence=self.settings.vehicle_type_confidence,
-            plate_type_confidence=self.settings.plate_type_confidence,
-            fast_mode=not self.settings.full_accuracy_mode,
-            vehicle_types_override=(None if refresh_vehicle_types else cached_vehicle_types),
+            **scan_options,
         )
         next_types = cached_vehicle_types
         if int(getattr(scanner, "last_plate_detection_count", 0)) <= 0:
@@ -245,6 +253,7 @@ class ScanService:
         plate_callback: Callable[[dict[str, Any]], None] | None,
         persist_archive: bool,
         run_full_ocr: bool = True,
+        camera_label: str | None = None,
     ) -> None:
         preprocess = preprocess_plate_crop or (lambda crop, parameters=None: crop)
         prefix = media if media in {"video", "camera", "image"} else "video"
@@ -267,8 +276,6 @@ class ScanService:
             count = int(candidate.get("count", 0))
             average_quality = float(candidate.get("vote_score", 0.0)) / max(1, count)
             best = candidate.get("best_plate", plate)
-            if not self._has_complete_registration(best):
-                continue
             if key in session.confirmed_keys:
                 self._refresh_published_track(
                     session,
@@ -279,6 +286,7 @@ class ScanService:
                     scanner=scanner,
                     output_stem=output_stem,
                     archive_camera_id=archive_camera_id,
+                    camera_label=camera_label,
                     media_prefix=prefix,
                     run_full_ocr=run_full_ocr,
                     count=count,
@@ -286,8 +294,14 @@ class ScanService:
                     plate_callback=plate_callback,
                 )
                 continue
+            fast_single_frame = (
+                prefix == "camera"
+                and count == 1
+                and count < min_confirmations
+                and self._is_promising_single_frame(best)
+            )
             if (
-                count < min_confirmations
+                (count < min_confirmations and not fast_single_frame)
                 or average_quality < self.settings.temporal_min_quality
             ):
                 continue
@@ -300,15 +314,22 @@ class ScanService:
                 track, candidate, key, frame_index, session.track_gap_frames
             ):
                 continue
+            # Keep live-camera inference responsive: publish the fast model
+            # reading first, then let the OCR worker refine it. In particular,
+            # do not turn an incomplete read into a synchronous full-OCR pass;
+            # that would hold the shared inference lane while another frame is
+            # already waiting to be scanned.
+            full_ocr_for_candidate = bool(run_full_ocr and prefix != "camera")
             record = self._materialise_candidate(
                 candidate,
                 len(session.confirmed_plates) + 1,
                 output_stem,
                 write_image,
                 scanner,
-                run_full_ocr=run_full_ocr,
+                run_full_ocr=full_ocr_for_candidate,
                 persist_archive=persist_archive,
                 archive_camera_id=archive_camera_id,
+                camera_label=(camera_label if prefix == "camera" else None),
                 write_files=False,
             )
             if record is None:
@@ -374,7 +395,7 @@ class ScanService:
             )
             public = dict(published)
             session.last_published.append(public)
-            if not run_full_ocr:
+            if not full_ocr_for_candidate:
                 crop = candidate.get("best_ready_crop")
                 if crop is not None:
                     session.pending_ocr.append(
@@ -399,6 +420,7 @@ class ScanService:
         count: int,
         average_quality: float,
         plate_callback: Callable[[dict[str, Any]], None] | None,
+        camera_label: str | None = None,
     ) -> None:
         """Replace a confirmed track when a later frame reads it more clearly."""
 
@@ -428,6 +450,7 @@ class ScanService:
             scanner,
             run_full_ocr=run_full_ocr,
             archive_camera_id=archive_camera_id,
+            camera_label=camera_label,
             persist_archive=False,
             write_files=False,
         )
@@ -541,6 +564,7 @@ class ScanService:
         output_stem: str,
         archive_camera_id: str,
         media: str = "video",
+        camera_label: str | None = None,
         source_fps: float = 25.0,
         plate_callback: Callable[[dict[str, Any]], None] | None = None,
         persist_archive: bool = True,
@@ -561,12 +585,24 @@ class ScanService:
             session, frame_index, max(1, int(stride)), source_fps
         )
         session.last_sampled_frame = int(frame_index)
+        roi_trigger_context = None
+        if (
+            media == "camera"
+            and isinstance(scan_roi, dict)
+            and str(scan_roi.get("shape", "")).lower() == "lane"
+        ):
+            roi_trigger_context = {
+                "tracks": session.roi_trigger_tracks,
+                "frame_index": int(frame_index),
+                "max_gap_frames": session.track_gap_frames,
+            }
         plates, annotated, next_types = self._scan_stream_frame(
             scanner,
             frame,
             session.sampled_frames,
             session.cached_vehicle_types,
             run_ocr=False,
+            roi_trigger_context=roi_trigger_context,
         )
         session.cached_vehicle_types = next_types
         session.last_detect_count = int(getattr(scanner, "last_plate_detection_count", len(plates)))
@@ -596,10 +632,15 @@ class ScanService:
             output_stem=output_stem,
             archive_camera_id=archive_camera_id,
             media=media,
+            camera_label=camera_label,
             source_fps=source_fps,
             plate_callback=plate_callback,
             persist_archive=persist_archive,
-            run_full_ocr=bool(run_full_ocr),
+            # CCTV OCR always runs in the background worker. The UI gets the
+            # fast character-model reading first, even when full-accuracy mode
+            # is enabled; video/file scans keep their existing synchronous
+            # full-accuracy behavior.
+            run_full_ocr=bool(run_full_ocr and media != "camera"),
         )
         return annotated
 
@@ -1790,6 +1831,7 @@ class ScanService:
         scanner: Any,
         run_full_ocr: bool = True,
         archive_camera_id: str = "0",
+        camera_label: str | None = None,
         persist_archive: bool = True,
         write_files: bool = True,
     ) -> dict[str, Any] | None:
@@ -1806,6 +1848,8 @@ class ScanService:
             return None
         record = dict(best)
         record["id"] = record_id
+        if camera_label:
+            record["camera_label"] = str(camera_label).strip()
         self._apply_reading_and_quality(
             record,
             scanner,
@@ -1993,6 +2037,53 @@ class ScanService:
         except OSError:
             LOGGER.warning("Could not persist archive sequence counter: %s", counter_path)
         return next_sequence
+
+    def _next_camera_archive_sequence(self, camera_day_dir: Path, date_text: str) -> int:
+        """Allocate a four-digit sequence scoped to one camera and day."""
+
+        pattern = re.compile(
+            rf"^(\d{{4,}})-.*-{re.escape(date_text)}-(?:rejected-)?full_vehicle\.(?:jpe?g|webp)$",
+            re.IGNORECASE,
+        )
+        with self._archive_sequence_lock:
+            highest = 0
+            for path in camera_day_dir.rglob("*-full_vehicle.*"):
+                match = pattern.match(path.name)
+                if match:
+                    highest = max(highest, int(match.group(1)))
+            counter_path = camera_day_dir / f".archive_sequence_{date_text}"
+            try:
+                highest = max(highest, int(counter_path.read_text(encoding="ascii").strip()))
+            except (OSError, ValueError):
+                pass
+            next_sequence = highest + 1
+            try:
+                counter_path.write_text(str(next_sequence), encoding="ascii")
+            except OSError:
+                LOGGER.warning("Could not persist camera archive sequence counter: %s", counter_path)
+            return next_sequence
+
+    def _camera_archive_stem(
+        self,
+        plate: dict[str, Any],
+        camera_label: str,
+        date_text: str,
+        sequence: int,
+    ) -> str:
+        """Build ``0001-LED01-BKK-76-4058-YYYYMMDD`` camera archive names."""
+
+        reading = self._selected_character_reading(plate)
+        province = self._filename_part(
+            plate.get("province_code") or reading.get("province_code") or plate.get("province"),
+            "unknown_province",
+        )
+        prefix = self._filename_part(
+            plate.get("plate_prefix") or reading.get("plate_prefix"),
+            "unknown_prefix",
+        )
+        number = self._filename_part(plate.get("plate_number"), "unknown_number")
+        camera = self._filename_part(camera_label, "camera")
+        return f"{sequence:04d}-{camera}-{province}-{prefix}-{number}-{date_text}"
 
     def _archive_stem(
         self,
@@ -2322,16 +2413,36 @@ class ScanService:
 
         date_text = datetime.now(LAOS_TIMEZONE).strftime("%Y%m%d")
         country = str(plate.get("country") or "")
-        country_dir = self._archive_directories(country, date_text)
-        dated_output_dir = country_dir.parent
-        sequence = self._next_archive_sequence(dated_output_dir, date_text)
-        stem = self._archive_stem(plate, archive_camera_id, date_text, sequence)
-        full_path = country_dir / f"{stem}-full_vehicle.webp"
-        crop_path = country_dir / f"{stem}-plate_crops.webp"
+        dated_output_dir = self._dated_output_dir(date_text)
+        camera_label = self._filename_part(plate.get("camera_label"), "")
+        if camera_label:
+            camera_day_dir = (
+                self.settings.output_dir
+                / camera_label
+                / date_text[:4]
+                / date_text[4:6]
+                / date_text[6:8]
+            )
+            camera_day_dir.mkdir(parents=True, exist_ok=True)
+            country_folder = self._camera_country_folder(country)
+            country_dir = camera_day_dir / country_folder
+            country_dir.mkdir(parents=True, exist_ok=True)
+            sequence = self._next_camera_archive_sequence(camera_day_dir, date_text)
+            stem = self._camera_archive_stem(plate, camera_label, date_text, sequence)
+            full_path = country_dir / f"{stem}-full_vehicle.webp"
+            crop_path = country_dir / f"{stem}-plate_crops.webp"
+        else:
+            country_dir = self._archive_directories(country, date_text)
+            sequence = self._next_archive_sequence(dated_output_dir, date_text)
+            stem = self._archive_stem(plate, archive_camera_id, date_text, sequence)
+            full_path = country_dir / f"{stem}-full_vehicle.webp"
+            crop_path = country_dir / f"{stem}-plate_crops.webp"
         # Save only the full frame and the exact preprocessed crop consumed by
         # OCR. ``ocr_ready_image`` points to the same crop for compatibility.
         ready_path = crop_path
         json_dir = dated_output_dir / "json"
+        json_dir.mkdir(parents=True, exist_ok=True)
+        plate_json_path = json_dir / f"{stem}_plate.json"
         if hasattr(full_vehicle, "shape") and len(full_vehicle.shape) >= 2:
             plate["image_width"] = int(full_vehicle.shape[1])
             plate["image_height"] = int(full_vehicle.shape[0])
@@ -2339,6 +2450,7 @@ class ScanService:
         write_image(ready_path, ready_crop)
         plate["archive_filename"] = full_path.name
         plate["archive_sequence"] = sequence
+        plate["plate_json"] = str(plate_json_path)
         dataset = plate.get("dataset", {})
         plate["training_status"] = (
             str(dataset.get("export_status") or "PASS")
@@ -2348,9 +2460,10 @@ class ScanService:
         plate["ocr_folder"] = str(json_dir)
         plate["ocr_ready_archive_image"] = str(ready_path)
         plate["ocr_character_annotated_image"] = ""
-        (json_dir / f"{stem}_plate.json").write_text(
+        plate_json_path.write_text(
             json.dumps(
                 {
+                    "camera_label": camera_label,
                     "province": plate.get("province", ""),
                     "province_code": plate.get("province_code", ""),
                     "plate_prefix": plate.get("plate_prefix", ""),
@@ -2375,6 +2488,26 @@ class ScanService:
             encoding="utf-8",
         )
         return full_path, crop_path, ready_path, None
+
+    @classmethod
+    def _camera_country_folder(cls, country: str) -> str:
+        """Return a stable English country folder for CCTV evidence."""
+
+        key = str(country or "").strip().lower().replace(".", "")
+        folders = {
+            "thai": "thai",
+            "thailand": "thai",
+            "th": "thai",
+            "lao": "laos",
+            "laos": "laos",
+            "lao pdr": "laos",
+            "la": "laos",
+            "vietnam": "vietnam",
+            "vietnamese": "vietnam",
+            "viet nam": "vietnam",
+            "vn": "vietnam",
+        }
+        return folders.get(key, cls._filename_part(country, "unknown"))
 
     def _write_image_debug_artifacts(
         self,
@@ -2801,6 +2934,54 @@ class ScanService:
                 return True
             return bool(plate.get("box"))
         return len(prefix) + len(number) >= 2
+
+    @staticmethod
+    def _is_high_confidence_single_frame(plate: dict[str, Any]) -> bool:
+        """Permit one clear, complete CCTV read when a fast vehicle won't recur."""
+
+        if not ScanService._has_complete_registration(plate):
+            return False
+        ocr = plate.get("ocr") if isinstance(plate.get("ocr"), dict) else {}
+        detection_confidence = float(plate.get("detection_confidence", 0.0) or 0.0)
+        recognition_confidence = max(
+            float(plate.get("recognition_confidence", 0.0) or 0.0),
+            float(ocr.get("confidence", 0.0) or 0.0),
+        )
+        country_margin = float(plate.get("country_confidence_margin", 0.0) or 0.0)
+        return (
+            detection_confidence >= 0.93
+            and recognition_confidence >= 0.95
+            and float(ocr.get("confidence", 0.0) or 0.0) >= 0.90
+            and country_margin >= 0.55
+            and ScanService._video_plate_quality(plate) >= 0.85
+        )
+
+    @staticmethod
+    def _is_promising_single_frame(plate: dict[str, Any]) -> bool:
+        """Decide whether a one-frame camera candidate merits full OCR.
+
+        The fast scanner deliberately skips OCR, so OCR confidence cannot be
+        part of this preflight. Keep the preflight conservative on detector,
+        character, crop quality, and registration completeness; final
+        acceptance still uses the stricter post-OCR gate above.
+        """
+
+        if not ScanService._has_complete_registration(plate):
+            return False
+        ocr = plate.get("ocr") if isinstance(plate.get("ocr"), dict) else {}
+        if ocr.get("status") != "deferred":
+            return False
+        validation = plate.get("validation")
+        if isinstance(validation, dict) and validation.get("valid") is False:
+            return False
+        evidence = plate.get("cross_model_digit_evidence")
+        if isinstance(evidence, dict) and evidence.get("status") == "conflict":
+            return False
+        return (
+            float(plate.get("detection_confidence", 0.0) or 0.0) >= 0.82
+            and float(plate.get("recognition_confidence", 0.0) or 0.0) >= 0.78
+            and ScanService._video_plate_quality(plate) >= 0.68
+        )
 
     @staticmethod
     def _video_plate_quality(plate: dict[str, Any]) -> float:

@@ -153,14 +153,16 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("gpuChip", response.text)
         self.assertIn("computeMode", response.text)
         self.assertIn("roiPanel", response.text)
-        self.assertIn("app.js?v=ops41", response.text)
-        self.assertIn("app.css?v=ops24", response.text)
+        self.assertIn("app.js?v=ops49", response.text)
+        self.assertIn("app.css?v=ops32", response.text)
         self.assertIn("OneVision", response.text)
         self.assertIn("Noto+Sans+Thai", response.text)
         self.assertIn("camerasBtn", response.text)
         self.assertIn("camerasPanel", response.text)
         self.assertIn("camerasClose", response.text)
         self.assertIn("camerasToolbarBtn", response.text)
+        self.assertIn('id="cameraSearch"', response.text)
+        self.assertIn('id="cameraDirectionFilter"', response.text)
         self.assertIn("cameraWallPager", response.text)
         self.assertIn("cameraWallMeta", response.text)
         script = self.client.get("/static/app.js")
@@ -172,7 +174,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("tableMeta", response.text)
         self.assertIn('id="crops"', response.text)
         self.assertIn("result-table-panel", response.text)
-        self.assertIn("crop-panel", response.text)
+        self.assertIn("result-crops", response.text)
 
     def test_scan_log_requires_login(self) -> None:
         response = self.client.get("/api/scans")
@@ -315,6 +317,9 @@ class WebAppTests(unittest.TestCase):
         builtin = {item["host"]: item["builtin"] for item in payload["cameras"]}
         self.assertTrue(builtin["192.168.100.50"])
         self.assertFalse(builtin["192.168.100.191"])
+        directions = {item["host"]: item["direction"] for item in payload["cameras"]}
+        self.assertEqual(directions["192.168.100.50"], "UNASSIGNED")
+        self.assertEqual(directions["192.168.100.191"], "UNASSIGNED")
         blocked = self.client.delete("/api/cameras", params={"host": "192.168.100.50"})
         self.assertEqual(blocked.status_code, 400)
         removed = self.client.delete("/api/cameras", params={"host": "192.168.100.191"})
@@ -489,6 +494,59 @@ class WebAppTests(unittest.TestCase):
             inference_interval(1, hub.settings, hot=False),
         )
 
+    def test_gpu_hub_runs_new_roi_detection_frame_urgently(self) -> None:
+        import time
+        from types import SimpleNamespace
+
+        from src.car_scan.config import Settings
+        from src.car_scan.worker import GpuHub
+
+        hub = GpuHub(
+            Settings(
+                root=Path.cwd(),
+                output_dir=Path(self._tmp.name),
+                database_url="",
+            )
+        )
+        now = time.monotonic()
+        urgent = SimpleNamespace(
+            hot=False,
+            urgent_infer=True,
+            last_infer_at=now,
+        )
+        idle = SimpleNamespace(
+            hot=False,
+            urgent_infer=False,
+            last_infer_at=0.0,
+        )
+        hub.lanes = {"urgent": urgent, "idle": idle}
+        hub.submit("urgent", None, 2)
+        hub.submit("idle", None, 1)
+
+        batch = [host for host, _ in hub._next_batch()]
+
+        self.assertEqual(batch, ["urgent"])
+        self.assertFalse(urgent.urgent_infer)
+        self.assertIn("idle", hub.pending)
+
+    def test_fast_camera_inference_scales_sublinearly_with_camera_count(self) -> None:
+        from src.car_scan.config import Settings
+        from src.car_scan.worker import inference_interval
+
+        settings = Settings(
+            root=Path.cwd(),
+            output_dir=Path(self._tmp.name),
+            database_url="",
+            camera_idle_submit_interval=0.18,
+            camera_hot_submit_interval=0.08,
+        )
+        idle_four = inference_interval(4, settings, hot=False)
+        hot_four = inference_interval(4, settings, hot=True)
+
+        self.assertLessEqual(idle_four, 0.37)
+        self.assertLessEqual(hot_four, 0.17)
+        self.assertLess(hot_four, idle_four)
+
     def test_hybrid_hub_keeps_hot_lanes_on_gpu_and_idle_on_cpu(self) -> None:
         import time
         from types import SimpleNamespace
@@ -516,7 +574,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual([host for host, _ in hub._next_batch("cpu")], ["idle"])
         self.assertEqual(hub.pending, {})
 
-    def test_preview_budget_slows_down_when_many_cameras_are_open(self) -> None:
+    def test_preview_budget_preserves_native_quality_and_source_frame_rate(self) -> None:
         from src.car_scan.config import Settings
         from src.car_scan.worker import preview_budget
 
@@ -524,16 +582,13 @@ class WebAppTests(unittest.TestCase):
             root=Path.cwd(),
             output_dir=Path(self._tmp.name),
             database_url="",
-            preview_fps=10.0,
-            preview_max_dimension=960,
+            preview_fps=60.0,
+            preview_max_dimension=1280,
         )
-        few_fps, few_dim, few_quality = preview_budget(1, settings)
-        wall_fps, wall_dim, wall_quality = preview_budget(8, settings)
-        self.assertGreaterEqual(few_fps, wall_fps)
-        self.assertLessEqual(wall_fps, 8.0)
-        self.assertLessEqual(wall_dim, 560)
-        self.assertGreater(few_dim, wall_dim)
-        self.assertGreater(few_quality, wall_quality)
+        one_fps, one_dim, one_quality = preview_budget(1, settings, source_fps=25.0)
+        many_fps, many_dim, many_quality = preview_budget(8, settings, source_fps=25.0)
+        self.assertEqual((one_fps, one_dim, one_quality), (25.0, None, 100))
+        self.assertEqual((many_fps, many_dim, many_quality), (25.0, None, 100))
 
     def test_worker_compute_requires_login_and_can_switch_to_cpu(self) -> None:
         anonymous = self.client.post("/api/worker/compute", json={"mode": "cpu"})
@@ -635,6 +690,18 @@ class WebAppTests(unittest.TestCase):
         roi = _parse_roi('{"enabled": false, "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}')
         self.assertIsNotNone(roi)
         self.assertFalse(roi["enabled"])
+
+    def test_parse_lane_roi_preserves_polygon_and_trigger_line(self) -> None:
+        roi = _parse_roi(
+            '{"shape":"lane","points":[{"x":0.1,"y":0.9},{"x":0.45,"y":0.4},'
+            '{"x":0.9,"y":0.4},{"x":0.75,"y":0.9}],'
+            '"trigger_line":[{"x":0.35,"y":0.6},{"x":0.9,"y":0.55}]}'
+        )
+        self.assertIsNotNone(roi)
+        self.assertEqual(roi["shape"], "lane")
+        self.assertEqual(len(roi["points"]), 4)
+        self.assertEqual(len(roi["trigger_line"]), 2)
+        self.assertAlmostEqual(roi["x"], 0.1)
 
     def test_create_job_requires_login(self) -> None:
         response = self.client.post("/api/jobs", data={"media_type": "image"})

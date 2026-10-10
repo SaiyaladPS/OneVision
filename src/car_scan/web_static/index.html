@@ -9,7 +9,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+Lao:wght@400;500;600;700;800&family=Noto+Sans+Thai:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <script src="/static/tailwind-theme.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="/static/app.css?v=ops25" />
+    <link rel="stylesheet" href="/static/app.css?v=ops32" />
   </head>
   <body class="m-0 h-full bg-desk text-ink">
     <div class="app grid min-h-full grid-cols-[196px_minmax(0,1fr)] max-[980px]:grid-cols-1">
@@ -38,7 +38,7 @@
         <header class="topbar flex items-center justify-between gap-3 px-[18px] pb-2 pt-3.5">
           <div>
             <h1 id="modeTitle" class="m-0 text-xl font-bold"></h1>
-            <p id="modeHint" class="hint m-1 text-muted"></p>
+            <p id="modeHint" class="hint m-1 text-muted ui-removed" hidden></p>
           </div>
           <div class="topbar-actions flex flex-wrap items-center justify-end gap-2">
             <span id="fileChip" class="chip rounded-gate border border-line bg-panel px-2.5 py-1.5 font-semibold"></span>
@@ -53,9 +53,9 @@
             <input id="fileInput" type="file" hidden />
             <span id="openLabel"></span>
           </label>
-          <button type="button" id="scanBtn" class="btn enamel" disabled></button>
-          <button type="button" id="stopBtn" class="btn signal" disabled></button>
-          <button type="button" id="saveBtn" class="btn steel" disabled></button>
+          <button type="button" id="scanBtn" class="btn enamel ui-removed" disabled hidden></button>
+          <button type="button" id="stopBtn" class="btn signal ui-removed" disabled hidden></button>
+          <button type="button" id="saveBtn" class="btn steel ui-removed" disabled hidden></button>
           <label class="check flex items-center gap-1.5">
             <input id="roiEnabled" type="checkbox" checked />
             <span id="roiEnabledLabel"></span>
@@ -74,7 +74,7 @@
             </label>
             <span id="gpuChip" class="chip muted rounded-gate border border-line bg-panel px-2.5 py-1.5 font-normal text-muted"></span>
           </div>
-          <button type="button" id="camerasToolbarBtn" class="btn ghost hidden"></button>
+          <button type="button" id="camerasToolbarBtn" class="btn ghost hidden ui-removed" hidden></button>
         </section>
 
         <div class="stage grid min-h-0 flex-1 grid-cols-[minmax(0,1.45fr)_minmax(280px,0.9fr)] gap-3 px-[18px] max-[980px]:grid-cols-1">
@@ -87,6 +87,7 @@
                     <option value="rectangle"></option>
                     <option value="circle"></option>
                     <option value="ellipse"></option>
+                    <option value="lane">เลน + เส้น Trigger</option>
                   </select>
                 </label>
                 <button type="button" id="roiFull" class="btn ghost"></button>
@@ -103,6 +104,15 @@
                   </div>
                   <span class="panel-meta" id="cameraSelectorMeta"></span>
                 </div>
+                <div class="camera-selector-filters">
+                  <input id="cameraSearch" type="search" autocomplete="off" />
+                  <select id="cameraDirectionFilter" aria-label="Filter cameras by direction">
+                    <option value="all"></option>
+                    <option value="IN"></option>
+                    <option value="OUT"></option>
+                    <option value="UNASSIGNED"></option>
+                  </select>
+                </div>
                 <div class="camera-selector-actions">
                   <button type="button" id="cameraSelectAll" class="btn ghost"></button>
                   <button type="button" id="cameraClearAll" class="btn ghost"></button>
@@ -113,6 +123,7 @@
                 <div class="panel-head-row camera-wall-head">
                   <div class="panel-head mb-0 font-bold" id="previewHead"></div>
                   <span class="panel-meta" id="cameraWallMeta"></span>
+                  <button type="button" id="cameraFocusBtn" class="btn ghost camera-focus-btn hidden" hidden></button>
                   <div id="cameraWallPager" class="camera-wall-pager hidden" hidden>
                     <button type="button" id="cameraWallPrev" class="btn ghost"></button>
                     <span id="cameraWallPageLabel"></span>
@@ -122,16 +133,10 @@
                 <div id="dropZone" class="well relative min-h-0 flex-1 overflow-hidden border border-[#0b1014] bg-well">
                   <canvas id="view"></canvas>
                   <div id="cameraGrid" class="camera-grid hidden" hidden></div>
+                  <div id="cameraFocusPicker" class="camera-focus-picker" hidden></div>
                   <p id="emptyHint" class="empty"></p>
                 </div>
               </div>
-            </div>
-            <div class="panel crop-panel mb-3 flex min-h-0 flex-col rounded-gate border border-line bg-panel p-2.5">
-              <div class="panel-head-row">
-                <div class="panel-head mb-0 font-bold" id="cropHead"></div>
-                <span class="panel-meta" id="cropMeta"></span>
-              </div>
-              <div id="crops" class="crops"></div>
             </div>
           </section>
 
@@ -149,17 +154,24 @@
               <dl id="details" class="details"></dl>
             </div>
             <div class="panel result-table-panel grow mb-3 flex min-h-0 flex-1 flex-col rounded-gate border border-line bg-panel p-2.5">
-              <div class="panel-head-row">
+              <div class="panel-head-row ui-removed" hidden>
                 <div class="panel-head mb-0 font-bold" id="tableHead"></div>
                 <span class="panel-meta" id="tableMeta"></span>
               </div>
-              <div class="table-wrap flex-1 overflow-auto">
+              <div class="table-wrap flex-1 overflow-auto ui-removed" hidden>
                 <table class="result-table">
                   <thead>
                     <tr id="tableHeader"></tr>
                   </thead>
                   <tbody id="tableBody"></tbody>
                 </table>
+              </div>
+              <div class="result-crops">
+                <div class="panel-head-row">
+                  <div class="panel-head mb-0 font-bold" id="cropHead"></div>
+                  <span class="panel-meta" id="cropMeta"></span>
+                </div>
+                <div id="crops" class="crops"></div>
               </div>
             </div>
           </section>
@@ -365,6 +377,6 @@
         <button type="button" id="passwordClose" class="btn ghost"></button>
       </div>
     </div>
-    <script src="/static/app.js?v=ops46"></script>
+    <script src="/static/app.js?v=roi-trigger-crossing-20261009"></script>
   </body>
 </html>

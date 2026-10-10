@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 
 def redact_stream_url(url: str) -> str:
@@ -483,6 +483,39 @@ def _path(value: str | None, default: Path) -> Path:
     return Path(value).expanduser() if value else default
 
 
+def normalize_database_url(value: str) -> str:
+    """Return a Prisma-safe PostgreSQL URL.
+
+    PostgreSQL passwords commonly contain characters such as ``@``.  When
+    those characters are written literally in a connection URL, parsers can
+    mistake them for URL delimiters and Prisma then authenticates against the
+    wrong host or credentials.  Rebuild the URL with escaped userinfo while
+    preserving the database path and query parameters.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urlsplit(text)
+        username = parsed.username
+        hostname = parsed.hostname
+        if not username or not hostname:
+            return text
+        password = parsed.password
+        userinfo = quote(unquote(username), safe="")
+        if password is not None:
+            userinfo += ":" + quote(unquote(password), safe="")
+        userinfo += "@"
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        netloc = f"{userinfo}{hostname}{port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    except ValueError:
+        # Leave malformed/non-URL values unchanged so the later connection
+        # error still explains the configuration problem.
+        return text
+
+
 def _load_env_file(path: Path) -> None:
     """Load simple KEY=VALUE settings without requiring python-dotenv."""
 
@@ -530,11 +563,10 @@ class Settings:
     camera_hot_submit_interval: float = 0.04
     temporal_min_quality: float = 0.58
     target_fps: float = 24.0
-    # Preview delivery is deliberately independent from capture/inference.
-    # Sending full-resolution frames at camera speed can starve the Qt event
-    # loop even when recognition itself runs in a worker thread.
-    preview_fps: float = 10.0
-    preview_max_dimension: int = 960
+    # File/video preview cap. Live CCTV preview bypasses this resize and uses
+    # the decoded camera resolution and reported source frame rate.
+    preview_fps: float = 60.0
+    preview_max_dimension: int = 1280
     # Keep uncertain examples useful for training without repeatedly encoding
     # full-resolution images while a video/camera stream is running.
     max_rejected_evidence_per_run: int = 20
@@ -566,7 +598,7 @@ class Settings:
         # Docker Compose and the deployment environment commonly expose
         # DATABASE_URL. Keep the application-specific name as the preferred
         # override, but accept the standard name for direct Windows runs too.
-        database_url = (
+        database_url = normalize_database_url(
             os.getenv("CAR_SCAN_DATABASE_URL", "").strip()
             or os.getenv("DATABASE_URL", "").strip()
         )
@@ -610,9 +642,9 @@ class Settings:
                 0.0, float(os.getenv("CAR_SCAN_TEMPORAL_MIN_QUALITY", "0.58"))
             ),
             target_fps=max(1.0, float(os.getenv("CAR_SCAN_TARGET_FPS", "24.0"))),
-            preview_fps=max(1.0, float(os.getenv("CAR_SCAN_PREVIEW_FPS", "10.0"))),
+            preview_fps=max(1.0, float(os.getenv("CAR_SCAN_PREVIEW_FPS", "60.0"))),
             preview_max_dimension=max(
-                160, int(os.getenv("CAR_SCAN_PREVIEW_MAX_DIMENSION", "960"))
+                160, int(os.getenv("CAR_SCAN_PREVIEW_MAX_DIMENSION", "1280"))
             ),
             max_rejected_evidence_per_run=max(
                 0, int(os.getenv("CAR_SCAN_MAX_REJECTED_EVIDENCE_PER_RUN", "20"))
